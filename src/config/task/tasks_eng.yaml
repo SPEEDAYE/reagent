@@ -1,0 +1,556 @@
+competitive_analysis_task:
+  description: >
+    Conduct a focused and data-driven competitive analysis for the target product {project_name}. Identify key competitors, compare core features, pricing, user experience, technical stack, and market positioning. Highlight each competitor’s strengths and weaknesses, uncover gaps and opportunities, and provide clear recommendations on how our product can differentiate and gain competitive advantage.
+    There is given project description: {Description}.
+  expected_output: >
+    Conduct a focused and data-driven competitive analysis for the target product {project_name}. 
+    Identify key competitors, compare their core features, pricing, user experience, technical approach, and market positioning. Analyze strengths, weaknesses, opportunities, and threats.
+    A summary of competitors' pain points and a fundamental analysis of their root causes is highly recommended.
+  agent: SoftwareManager
+
+business_requirements_document_task:
+  description: >
+    Write a Business Requirements Document (BRD) for the project, strictly following the provided document format. 
+    Gather and structure all relevant business information including goals, stakeholders, business processes, high-level functional requirements, 
+    non-functional expectations, risks, assumptions, and success criteria. Ensure the BRD is clear, complete, logically structured, and aligned with standard industry practices.
+    There is your competitive analysis report as referance:
+    {competitive_analysis}
+    context diagram should also be inclued as part of BRD:
+    {context_diagram}
+  expected_output: >
+    A fully written Business Requirements Document that follows the exact structure 
+    of document_format_reference, here is document format for referance:
+    {document_format_reference}
+    The output must be complete, formatted, and ready for stakeholder review.
+    Use the following template to generate the content of a document chapter.
+    Your output MUST be a Python dictionary strictly following this structure and rules:
+    Chapter Template Requirements
+    Generate a chapter as a Python dictionary that contains:
+    1. chapter_index
+    A hierarchical chapter number using dot notation.
+    Formats allowed: "3"  "3.2" "3.2.1". Chapters and subchapters are separated by ".".
+    2. content
+    A long, well-written text describing the main body of the chapter.
+    3. requirements
+    A list of requirement dictionaries.
+    Each requirement dictionary MUST contain:
+    "index": a unique requirement ID formatted as <chapter_index>--<requirement_number>,
+    where requirement_number starts at 1 and increases sequentially.
+    "content": a natural-language description of the requirement.
+    4. chapters
+    A list of nested chapter dictionaries.
+    Each subchapter MUST follow the exact same template described above. 
+    Subchapter indices must extend the parent chapter index (e.g., subchapters of 5.3 must be 5.3.1, 5.3.2, etc.).
+    5. title
+    A string representing the title of the chapter.
+    6. introduction
+    A brief introductory paragraph summarizing the chapter's purpose and scope.
+    Your final output MUST be a Python dictionary matching the structure below:
+    {
+        'title': "(Chapter Title)",
+        'introduction': "(Brief introductory paragraph.)",
+        "chapter_index": "X.Y.Z",
+        "content": "(Main descriptive text of this chapter.)",
+        "requirements": [
+            {
+                "index": "X.Y.Z--1",
+                "content": "(Requirement text.)"
+            },
+        ...
+        ],
+        "chapters": [
+            {
+                "chapter_index": "X.Y.Z.W",
+                "content": "(Text.)",
+                "requirements": [...],
+                "chapters": [...]
+            }
+        ]
+    }
+  agent: SoftwareManager
+
+draft_context_diagram_task:
+  description: >
+    Create a context diagram for the software system {project_name}. 
+    Identify all external entities interacting with the system, including users, 
+    subsystems, third-party services, data sources, and external organizations. 
+    Clearly define the system boundary and illustrate every input/output flow 
+    between the system and each external entity. 
+    The diagram MUST be represented using Mermaid syntax.
+    you can use competitive analysis as referance:
+    {competitive_analysis}
+  expected_output: >
+    A Mermaid diagram in a code block that:
+    - Uses flowchart syntax (e.g., "flowchart TD" or "flowchart LR")
+    - Contains one main node representing the system boundary
+    - Contains nodes for all external entities
+    - Contains arrows showing all data/control flows between the system and entities
+    - Is syntactically valid Mermaid so it can be rendered directly
+  agent: SoftwareManager
+
+user_introduction_draft_task:
+  description: >
+    Based on the business requirements document for {project_name}, generate a 
+    structured analysis of all potential user groups who will interact with or 
+    benefit from the software system. Your goal is to transform business needs 
+    into clearly defined user categories.
+
+    For each potential user group, identify:
+      - 用户画像（User Persona）: demographic and role characteristics, job responsibilities,
+        skill level, environment, and digital proficiency.
+      - 用户介绍（User Profile）: including 
+          * 特征描述 (Key Characteristics)
+          * 核心诉求 (Primary Needs & Goals)
+          * 高频行为 (High-frequency Behaviors & Usage Patterns)
+      - 用户痛点（User Pain Points）: operational challenges, unmet needs, workflow 
+        obstacles, inefficiencies, and frustrations revealed by the business context.
+
+    If helpful, you may reference insights inferred from business requirement document:
+    {BRD}
+
+  expected_output: >
+    A  well-organized **narrative-style user introduction**, where **each user group 
+    is introduced in an independent subsection**. For each user group, include:
+      - 用户群体 (User Group)
+      - 用户画像 (Persona)
+      - 特征描述 (Characteristics)
+      - 核心诉求 (Primary Needs)
+      - 高频行为 (High-frequency Behaviors)
+      - 用户痛点 (Pain Points)
+    The table should be clean, complete, and logically derived from the business 
+    requirements document. No Mermaid or diagrams are needed.
+
+  agent: SoftwareManager
+
+user_case_draft_task:
+  description: >
+    Based on the business requirements document for {project_name}, generate a 
+    structured analysis of all potential user groups who will interact with or 
+    benefit from the software system. Your goal is to transform business needs 
+    into clearly defined user categories.
+
+    For each potential user group, identify:
+      - 用户画像（User Persona）: demographic and role characteristics, job responsibilities,
+        skill level, environment, and digital proficiency.
+      - 用户介绍（User Profile）: including 
+          * 特征描述 (Key Characteristics)
+          * 核心诉求 (Primary Needs & Goals)
+          * 高频行为 (High-frequency Behaviors & Usage Patterns)
+      - 用户痛点（User Pain Points）: operational challenges, unmet needs, workflow 
+        obstacles, inefficiencies, and frustrations revealed by the business context.
+
+    If helpful, you may reference insights inferred from business requirement document:
+    {BRD}
+
+    User introduction can also serves as input:
+    {user_introduction}
+
+  expected_output: >
+    The output MUST be a collection of user use cases stored as a **list of dictionaries**, 
+    where each dictionary represents one complete use case.
+    Each use case dictionary MUST include the following fields:
+    - "use_case_name": A concise and descriptive name of the use case.
+    - "primary_actor": The main user or system that initiates the use case.
+    - "secondary_actor": Additional users, systems, or external entities that support or participate.
+    - "use_case_description": A short paragraph describing the purpose and scope of the use case.
+    - "preconditions": A list of conditions that must be true before the use case begins.
+    - "postconditions": A list of conditions that must be true after the use case completes.
+    - "main_flow": A numbered list describing the normal flow of events (the success scenario).
+    - "alternative_flows": A list of alternative sequences that may replace or modify parts of the main flow.
+    - "exception_flows": A list of exceptional paths due to errors, invalid inputs, missing data, or system failures.
+    - "priority": The importance or implementation priority of the use case (e.g., High / Medium / Low).
+    - "business_rules": A list of business rules that govern, constrain, or justify the use case.
+    - "assumptions": A list of assumptions on which the use case depends.
+    - "other_constraints": Any additional relevant constraints, remarks, or rules not included above.
+
+    The final output MUST be syntactically valid JSON-like dictionaries (Python style is acceptable), 
+    and MUST NOT include explanations or prose outside the structure. It must represent ONLY the list 
+    of use case dictionaries, ready to be written to a file. Here is an example:
+    [
+      {
+        "use_case_name": "",
+        "primary_actor": "",
+        "secondary_actor": [],
+        "use_case_description": "",
+        "preconditions": [],
+        "postconditions": [],
+        "main_flow": [],
+        "alternative_flows": [],
+        "exception_flows": [],
+        "priority": "",
+        "business_rules": [],
+        "assumptions": [],
+        "other_constraints": []
+    }
+    ]
+  agent: SoftwareManager
+
+data_flow_diagram_draft_task:
+  description: >
+    Based on the user use cases and the context diagram of the software system 
+    {project_name}, generate a structured Data Flow Diagram (DFD). The DFD must 
+    accurately reflect the processes, external entities, data flows, and data 
+    stores implied by the use cases and system interactions.
+
+    You must:
+    - Extract all **processes** from user use cases (e.g., main flow steps that 
+      transform or route data).
+    - Derive **external entities** from the context diagram and actors in use cases.
+    - Identify **data flows** from inputs, outputs, preconditions, postconditions, 
+      and system responses described in the use cases.
+    - Identify **data stores** from the business domain, use case assumptions, 
+      and system requirements (e.g., Course Database, User Records, Logs).
+    - Ensure the DFD reflects a coherent and traceable view of the system’s 
+      information flow across all actors and processes.
+
+    You may use the use case descriptions as reference:
+    {use_case_descriptions}
+
+    context diagram can also serves as reference when it comes to external entities :
+    {context_diagram}
+
+  expected_output: >
+    A valid Mermaid-based **Data Flow Diagram** (Level-0 or Level-1) in a code block.
+    The diagram MUST:
+    - Use flowchart syntax (e.g., "flowchart TD" or "flowchart LR")
+    - Contain nodes for:
+        * Processes (use rounded rectangles)
+        * External Entities (use square or rectangular nodes)
+        * Data Stores (use parallel-line notation or double-bracket syntax)
+    - Include directional arrows for all data flows
+    - Present the system’s logical processes clearly, derived directly from the 
+      user use cases and context diagram
+    - Be a fully valid Mermaid diagram ready for direct rendering
+
+  agent: SoftwareManager
+
+dialog_map_draft_task:
+  description: >
+    Based on the validated user use cases and the context diagram of the system 
+    {project_name}, create a complete Dialog Map that captures the interaction 
+    structure between users and the system.
+
+    The Dialog Map must:
+      - Reflect the system boundary and external entities from the context diagram.
+      - Derive every dialog node from corresponding user goals, triggers, and
+        interaction steps found in the user use cases.
+      - Show how users transition between intentions, system responses, choices,
+        validations, and alternate/exception flows.
+      - Represent conversational or interaction logic as a connected graph of nodes
+        (Intentions, System Actions, Decision Points, Outcomes).
+
+    Sources of truth include:
+      - User use cases 
+      {use_case_descriptions}
+      - Context diagram (external entities, inputs/outputs, system boundary)
+      {context_diagram}
+      - Business rules and assumptions from the requirements context
+
+  expected_output: >
+    A Dialog Map represented in Mermaid syntax, inside a code block, that:
+      - Uses flowchart syntax (e.g., "flowchart TD" or "flowchart LR")
+      - Contains one top-level goal per user use case as a high-level dialog node
+      - Breaks each goal into dialog fragments:
+          * User Intentions (what the actor is trying to do)
+          * System Responses (validations, information displays, confirmations)
+          * Decision Points (branches where user or system chooses)
+          * Outcomes (success or failure states)
+      - Includes branches for alternative flows and exception flows
+      - Connects dialog nodes according to transitions implied by use cases
+      - Is syntactically valid Mermaid and ready to render directly
+
+  agent: SoftwareManager
+
+data_dictionary_draft_task:
+  description: >
+    Based on the Data Flow Diagram (DFD) and the Conversation Diagram of the 
+    software system {project_name}, construct a complete and well-structured 
+    **Data Dictionary**.
+
+    The Data Dictionary MUST accurately describe every data element appearing in:
+      - 数据流图（DFD）中的所有数据流（Data Flows）
+      - 数据存储（Data Stores）
+      - 外部实体与系统之间的数据交换内容
+      - 对话图（Conversation Diagram）中识别的消息、事件、对话事务
+
+    For each identified data item, you MUST clearly specify:
+      - 数据名称（Name）
+      - 数据类型（Type，例如 string, integer, object, list）
+      - 描述（Description）：说明数据在业务中的含义
+      - 组成结构（Structure）：若为复合数据，需列出内部字段及属性
+      - 来源（Source）：数据由哪个过程、外部实体或存储产生
+      - 去向（Destination）：数据流向的过程、实体或存储
+      - 业务规则（Business Rules）：影响数据值或格式的业务逻辑
+      - 约束（Constraints）：格式要求、合法值范围、字段要求等
+
+    You may reference data flow diagram 爱你nd conversation diagram as sources of truth:
+      - Data Flow Diagram:
+      {data_flow_diagram}
+      - Conversation Diagram:
+      {dialog_map}
+
+  expected_output: >
+    A comprehensive **Data Dictionary** presented in Markdown format.  
+    The output MUST include:
+
+    - A top-level table summarizing all data items (name + description + type)
+    - Detailed subsections for each data element, containing:
+        - 数据名称 (Name)
+        - 数据类型 (Type)
+        - 描述 (Description)
+        - 组成结构 (Structure, if composite)
+        - 是否必填 (Required)
+        - 校验规则 (Validation Rules)
+        - 来源 (Source)
+        - 去向 (Destination)
+        - 约束 (Constraints)
+
+    The output must be:
+      - Consistent with the DFD and Conversation Diagram
+      - Clear, complete, and suitable for inclusion in an SRS or design document
+      - Without Mermaid diagrams; only structured Markdown tables/text
+
+      这是一个案例：
+      字段定义（Excel 模板）：
+    | 字段名 | 类型 | 必填 | 校验规则 |
+    | :--- | :--- | :--- | :--- |
+    | 课程代码 | String | 是 | 长度 6-10 位，唯一 |
+    | 课程名称 | String | 是 | 长度 2-50 位 |
+    | 授课教师 | String | 是 | 必须是系统中已存在的教师 |
+     学分 | Number | 是 | 0.5-10，步长 0.5 |
+    | 学时 | Number | 是 | 16-128 |
+    | 上课时间 | String | 是 | 格式：周X 第X-X节，如"周一 1-2" |
+    | 周次范围 | String | 是 | 格式：第X-X周，如"第1-16周" |
+    | 上课教室 | String | 是 | 必须是系统中已存在的教室 |
+    | 授课班级 | String | 是 | 多个班级用逗号分隔，如"2024计算机1班,2024计算机2班" |
+    | 容量 | Number | 是 | 10-500 |
+
+  agent: SoftwareManager
+
+SRS_draft_task:
+  description: >
+    Write chapter {chapter_index} of the Software Requirements Specification (SRS) for the project,
+    strictly following the provided document structure.
+    Gather and structure all relevant business information, including goals, stakeholders,
+    business processes, high-level functional requirements, non-functional expectations, risks,
+    assumptions, and success criteria. Ensure the SRS is clear, complete, logically structured,
+    and aligned with standard industry practices.
+
+    Where appropriate, you should include diagrams such as context diagrams, data flow diagrams,
+    dialog maps, and data dictionaries as part of the SRS chapter content (describe them in text;
+    do not output image files).
+
+    Here is your reference information:
+    {reference}
+
+  expected_output: >
+    Produce a fully written SRS chapter that follows the exact structure of the given SRS chapter
+    format. Here is the chapter structure format for reference:
+    {SRS_chapter_structure}
+
+    The output must be complete, well-written, and ready for stakeholder review.
+
+    Whenever the reference material contains diagrams, charts, Mermaid diagrams, data flow diagrams,
+    context diagrams, entity-relationship diagrams, dialog maps, or tables, you MUST reuse and reproduce
+    these diagrams in your output.
+    Reuse them EXACTLY as they appear in the reference, without modification, unless you are explicitly
+    asked to adapt or extend them.
+    Insert each diagram or table into the most appropriate subsection of the generated chapter.  
+    You MUST analyze the meaning of the diagram and determine the correct placement.
+
+    Your output MUST be in chinese.
+
+    Chapter Template Requirements
+    Generate a chapter as a Python dictionary that contains:
+
+    1. chapter_index
+       - A hierarchical chapter number using dot notation.
+       - Allowed formats: "3", "3.2", "3.2.1".
+       - Chapters and subchapters are separated by ".".
+
+    2. title
+       - A string representing the title of the chapter.
+
+    3. introduction
+       - A brief introductory paragraph summarizing the chapter's purpose and scope.
+
+    4. content
+       - A long, well-written text describing the main body of the chapter.
+       - When the chapter in the document structure is related to requirements
+         (for example, documentation requirements or functional requirements),
+         the specific functional requirements should also be listed clearly in the content,
+         preferably as bullet points or numbered items.
+
+    5. requirements
+       - A list of requirement dictionaries.
+       - This field SHOULD be present only when the chapter is related to requirements.
+       - This field should point out the priority of each requirement (e.g., High / Medium / Low).
+       - Each requirement dictionary MUST contain:
+         * "index": a unique requirement ID formatted as <chapter_index>--<requirement_number>,
+           where requirement_number starts at 1 and increases sequentially.
+         * "content": a natural-language description of the requirement.
+
+       Example:
+       "requirements": [
+         {
+           "index": "3.1--1",
+           "content": "(high) The system shall allow teachers to create and edit course schedules."
+         },
+         {
+           "index": "3.1--2",
+           "content": "(medium) The system shall detect and prevent time conflicts between courses."
+         }
+       ]
+
+    6. chapters
+       - A list of nested chapter dictionaries (subchapters).
+       - Each subchapter MUST follow the same template:
+         it must contain "title", "introduction", "chapter_index", "content",
+         an optional "requirements" list, and its own "chapters" list.
+       - Subchapter indices must extend the parent chapter index
+         (e.g., subchapters of 5.3 must be 5.3.1, 5.3.2, etc.).
+
+    Your final output MUST be a single valid JSON object.
+    - Do NOT include any explanation or extra text before or after the JSON.
+    - Do NOT wrap it in Markdown code fences.
+    - Use only double quotes for all keys and string values.
+    - Do NOT include comments.
+    - Do NOT include trailing commas.
+
+    Your final output MUST be a single Python dictionary matching this structure:
+    {
+      "title": "(Chapter Title)",
+      "introduction": "(Brief introductory paragraph.)",
+      "chapter_index": "X.Y.Z",
+      "content": "(Main descriptive text of this chapter.)",
+      "requirements": [
+        {
+          "index": "X.Y.Z--1",
+          "content": "(Requirement text.)"
+        }
+      ],
+      "chapters": [
+        {
+          "title": "(Subchapter Title)",
+          "introduction": "(Subchapter introduction.)",
+          "chapter_index": "X.Y.Z.W",
+          "content": "(Subchapter text.)",
+          "requirements" (if needed): [
+            {
+              "index": "X.Y.Z.W--1",
+              "content": "(Subchapter requirement text.)"
+            }
+          ],
+          "chapters": [
+            ...
+          ]
+        }
+      ]
+    }
+
+  agent: SoftwareManager
+
+extract_document_skeleton_task:
+  description: >
+    Based on the provided document sample {document_example}, extract the
+    hierarchical structural skeleton of the document up to second-level
+    headings and convert it into a normalized dictionary-based representation.
+
+    Your goal is to:
+      - Parse and understand the organizational structure of the example document.
+      - Identify all Level-1 (top-level) and Level-2 section headings.
+      - For each Level-1 section, create a dictionary that contains its title,
+        introduction, and a list of its Level-2 subsections.
+      - For each Level-2 section, extract its title and a concise description
+        summarizing the purpose or content of that subsection.
+      - Ignore Level-3 or deeper headings and all content not relevant to the
+        structural skeleton.
+
+    The goal is to produce a reusable template structure that reflects the
+    document's logical organization without copying its full content.
+
+  expected_output: >
+    Output a JSON list where each element represents a Level-1 section as a dictionary.
+    Each dictionary must contain:
+      - "title": the Level-1 section name.
+      - "introduction": a short summary (1–3 sentences) describing what the section covers.
+      - "chapter": a list of Level-2 subsections, where each subsection is a dictionary with:
+            * "title": subsection name
+            * "introduction": short description of the subsection
+
+    Example structure (illustrative only):
+    [
+      {
+        "title": "Section 1 Title",
+        "introduction": "Summary of Section 1...",
+        "chapter": [
+          {
+            "title": "Section 1.1 Title",
+            "introduction": "Summary of Section 1.1..."
+          },
+          {
+            "title": "Section 1.2 Title",
+            "introduction": "Summary of Section 1.2..."
+          }
+        ]
+      },
+      {
+        "title": "Section 2 Title",
+        "introduction": "Summary of Section 2...",
+        "chapter": []
+      }
+    ]
+
+    Requirements:
+      - Output must be valid JSON.
+      - Do not include extra commentary outside the JSON structure.
+      - All Level-2 sections must appear inside the "chapter" field of their parent Level-1.
+      - If a Level-1 section has no Level-2 subsections, "chapter" should be an empty list.
+
+  agent: SoftwareManager
+
+artifact_planning_task:
+  description: >
+    Based on the provided requirements document chapter structure and the list
+    of available system artifacts, infer the artifact dependencies required for
+    each chapter. The output must strictly be a Python-style list of lists,
+    where each inner list contains the artifact names needed for that chapter.
+
+    The artifacts you can choose from include:
+    - context diagram
+    - BRD (business requirement document)
+    - competitive analysis
+    - user introduction
+    - user case
+    - dialog map
+    - data flow diagram
+    - data dictionary
+
+
+    For each chapter in the document structure:
+      1. Understand the purpose of that chapter.
+      2. Identify all required artifacts that must be referenced or relied upon
+         to write that chapter correctly.
+      3. Output dependencies ONLY as artifact names (strings), without rationale.
+      4. The final output must be a list of lists, where each index corresponds to
+         the same index in the chapter structure.
+
+    Here is your reference requirements document chapter structure:
+    {document_structure}
+    Here is introduction information for aforementioned artifacts:
+    {artifact_to_choose}
+
+  expected_output: >
+    A Python list of lists where each sub-list contains the artifact dependencies
+    required for the corresponding chapter. The output must be valid Python syntax
+    and contain no trailing commentary.
+    你的依赖输出应该以大章为单位, 例如十章就输出十个列表, 不要为每个子章单独输出。
+    且最好每一章有一至三个依赖, 任何一章的依赖不能为空.
+    Example output format:
+      [
+        ['context_diagram', 'BRD', 'competitive_analysis'], # for section 1
+        ['user_introduction', 'BRD', 'context_diagram'], # for section 2
+        ['user_case', 'dialog_map', 'context_diagram'], # for section 3
+        ...
+      ]
+  agent: SoftwareManager
