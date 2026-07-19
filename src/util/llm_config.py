@@ -197,6 +197,7 @@ def build_llm() -> LLM:
         "model": config.model,
         "api_key": config.api_key,
         "provider": "openai",
+        "stream": True,  # Enable token-level streaming for SSE delta events
     }
 
     if config.base_url:

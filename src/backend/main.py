@@ -36,6 +36,7 @@ app.add_middleware(
 async def startup():
     await connect_db()
     stream_manager.set_loop(asyncio.get_event_loop())
+    await _cleanup_zombie_projects()
 
 
 @app.on_event("shutdown")
@@ -44,3 +45,28 @@ async def shutdown():
 
 
 register_routes(app)
+
+
+async def _cleanup_zombie_projects():
+    """On startup, reset any project stuck in 'running' or 'interrupted'
+    status from a previous backend instance (worker threads are gone after
+    restart, so these projects can never resume on their own).
+
+    Sets them to 'cancelled' with a note so the frontend reflects reality.
+    """
+    from backend.db.mongo import projects_col
+
+    zombie_statuses = ["running", "interrupted"]
+    result = await projects_col().update_many(
+        {"status": {"$in": zombie_statuses}},
+        {"$set": {
+            "status": "cancelled",
+            "last_error": "Backend restarted — pipeline state lost",
+            "current_crew": None,
+        }},
+    )
+    if result.modified_count > 0:
+        print(
+            f"[startup] Cleaned {result.modified_count} zombie project(s) "
+            f"(running/interrupted → cancelled)"
+        )

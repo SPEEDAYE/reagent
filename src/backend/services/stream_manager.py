@@ -99,7 +99,7 @@ class StreamManager:
         self._history[project_id].append(event)
 
         # Mark terminated on final events so TTL cleanup can run.
-        if event.get("type") in ("finished",) or (
+        if event.get("type") in ("finished", "cancelled") or (
             event.get("type") == "error" and not event.get("recoverable", False)
         ):
             self._terminated_at[project_id] = time.time()
@@ -192,7 +192,7 @@ class StreamManager:
                 "id": str(event.get("_seq", "")),
                 "data": json.dumps(event, ensure_ascii=False),
             }
-            if event_type in ("finished", "error"):
+            if event_type in ("finished", "error", "cancelled"):
                 if not event.get("recoverable", False):
                     break
 

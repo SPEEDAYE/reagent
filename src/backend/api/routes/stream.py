@@ -48,7 +48,10 @@ async def stream_create(req: StreamCreateRequest):
     if req.human_request:
         config["description"] += f"\n\n补充说明: {req.human_request}"
 
-    await exec_svc.start(req.project_id, config)
+    try:
+        await exec_svc.start(req.project_id, config)
+    except RuntimeError as e:
+        return {"error": str(e), "status": "rejected"}
     return {"status": "started", "project_id": req.project_id}
 
 
@@ -91,6 +94,15 @@ async def _terminal_state_stream(project: dict):
             "event": "finished",
             "data": json.dumps(
                 {**completed_payload, "type": "finished"},
+                ensure_ascii=False,
+            ),
+        }
+    elif status == "cancelled":
+        yield {
+            "event": "cancelled",
+            "data": json.dumps(
+                {"type": "cancelled", "project_id": project_id, "replay": True,
+                 "reason": project.get("last_error") or "Pipeline was cancelled"},
                 ensure_ascii=False,
             ),
         }
@@ -154,7 +166,7 @@ async def stream_events(
     project = await projects_col().find_one(
         {"project_id": project_id}, {"_id": 0}
     )
-    if project and project.get("status") in ("completed", "finished", "error"):
+    if project and project.get("status") in ("completed", "finished", "error", "cancelled"):
         return EventSourceResponse(_terminal_state_stream(project))
 
     # Truly unknown project — the subscribe generator will emit an error.

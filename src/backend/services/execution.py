@@ -44,6 +44,11 @@ from backend.services.project_service import ProjectService
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reagent")
 _active: dict[str, threading.Thread | asyncio.Future] = {}
 
+# Track projects that have been cancelled (e.g. via DELETE) so that
+# _patched_run_with_retry can check before each crew kickoff.
+_cancelled_projects: set[str] = set()
+_cancel_lock = threading.Lock()
+
 project_svc = ProjectService()
 
 
@@ -107,6 +112,25 @@ class ExecutionService:
         if project_id in _active:
             raise RuntimeError(f"Project {project_id} is already running")
 
+        # Auto-cancel any running project so the new one can start immediately.
+        # With a single-worker executor, only one pipeline can run at a time;
+        # the user expects that starting a new pipeline supersedes the old one.
+        if _active:
+            old_pid = next(iter(_active))
+            old_future = _active.get(old_pid)
+            print(f"[execution] Auto-cancelling running project {old_pid} "
+                  f"to start new project {project_id}")
+            await self.cancel(old_pid)
+            # Wait for the old worker thread to actually exit so the
+            # single-worker executor is free for the new pipeline.
+            if old_future is not None:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(old_future), timeout=15
+                    )
+                except (asyncio.TimeoutError, Exception):
+                    pass  # Worker cancelled; TimeoutError is expected
+
         # Register feedback slot for this project
         from util.util import register_feedback_slot, set_stream_callback
         register_feedback_slot(project_id)
@@ -149,6 +173,46 @@ class ExecutionService:
         await project_svc.update_status(project_id, status="running")
         submit_feedback(project_id, value)
         return {"status": "resumed", "project_id": project_id}
+
+    async def cancel(self, project_id: str) -> dict:
+        """Cancel a running or queued pipeline.
+
+        Strategy:
+          - Mark the project as cancelled so _patched_run_with_retry can
+            check before the next crew kickoff.
+          - Inject CANCEL_SIGNAL via cancel_feedback_slot() to unblock a
+            worker that is waiting in multiline_input().
+          - Clean up residual state if the project is not in _active.
+        """
+        from util.util import cancel_feedback_slot, unregister_feedback_slot
+
+        result = {"project_id": project_id, "action": "none"}
+
+        # 1. Mark as cancelled (checked by _patched_run_with_retry)
+        with _cancel_lock:
+            _cancelled_projects.add(project_id)
+
+        # 2. Inject cancel signal to unblock worker in multiline_input()
+        signalled = cancel_feedback_slot(project_id)
+
+        # 3. Clean up based on whether project is active
+        if project_id in _active:
+            # Immediately remove from _active so that start() won't reject
+            # new projects while the worker thread is still unwinding.
+            _active.pop(project_id, None)
+            result["action"] = "cancel_signalled" if signalled else "cancel_marked"
+        else:
+            # Project already finished or never started — just clean up residual state
+            unregister_feedback_slot(project_id)
+            try:
+                stream_manager.remove_queue(project_id)
+            except Exception:
+                pass
+            with _cancel_lock:
+                _cancelled_projects.discard(project_id)
+            result["action"] = "cleaned_up"
+
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +288,27 @@ def _run_pipeline(project_id: str, config: dict):
     os.makedirs(crewai_storage, exist_ok=True)
     os.environ["CREWAI_STORAGE_DIR"] = crewai_storage
 
+    # Register LLM stream chunk listener for token-level SSE events
+    from crewai.events.event_bus import crewai_event_bus
+    from crewai.events.types.llm_events import LLMStreamChunkEvent
+
+    _current_crew_name = [None]  # mutable ref for closure
+
+    def _on_llm_chunk(source, event):
+        """Forward LLM stream chunks as SSE 'token' events."""
+        if not isinstance(event, LLMStreamChunkEvent):
+            return
+        chunk_text = event.chunk if hasattr(event, "chunk") else ""
+        if not chunk_text:
+            return
+        agent_role = event.agent_role if hasattr(event, "agent_role") else None
+        _emit(project_id, "token",
+              delta=chunk_text,
+              crew_name=_current_crew_name[0],
+              agent_role=agent_role)
+
+    crewai_event_bus.register_handler(LLMStreamChunkEvent, _on_llm_chunk)
+
     # Register run_with_retry event hooks via thread-local
     from util import run_with_retry  # noqa: F401
     import util as util_mod
@@ -233,6 +318,17 @@ def _run_pipeline(project_id: str, config: dict):
     def _patched_run_with_retry(crew_callable, inputs, name, retries=5,
                                 delay=15, post_process_callable=None,
                                 post_process_params=None):
+        # Cancel check: if the project has been marked for cancellation,
+        # abort before starting the next crew.
+        with _cancel_lock:
+            if project_id in _cancelled_projects:
+                from util.util import PipelineCancelledError
+                raise PipelineCancelledError(
+                    f"Pipeline for project {project_id} was cancelled"
+                )
+
+        _current_crew_name[0] = name  # track for token events
+
         _update_project_status_sync(
             project_id,
             status="running",
@@ -409,33 +505,70 @@ def _run_pipeline(project_id: str, config: dict):
         )
 
     except Exception as e:
-        error_msg = f"{type(e).__name__}: {e}"
-        # Capture a full error context dump BEFORE updating status so the log
-        # retains the live stack trace with the project's in-flight state.
-        try:
-            from backend.services.logging_service import log_error_context
-            log_error_context(
-                project_id, e,
-                stage=config.get("_current_stage"),
-                project_name=config.get("project_name"),
-                srs_template=config.get("srs_template"),
-                srs_example_path=config.get("srs_example_path"),
-            )
-        except Exception:
-            pass
+        from util.util import PipelineCancelledError, PipelineInterruptTimeoutError
 
-        _update_project_status_sync(
-            project_id,
-            status="error",
-            current_stage=config.get("_current_stage"),
-            current_crew=None,
-            last_error=error_msg,
-        )
-        _emit(project_id, "error", wait=True, error=error_msg, recoverable=False)
+        if isinstance(e, PipelineCancelledError):
+            # Pipeline was cancelled (project deleted or manual cancel)
+            _update_project_status_sync(
+                project_id,
+                status="cancelled",
+                current_stage=None,
+                current_crew=None,
+            )
+            _emit(project_id, "cancelled", wait=True,
+                  reason="Project was deleted or manually cancelled")
+
+        elif isinstance(e, PipelineInterruptTimeoutError):
+            # Interrupt wait timed out
+            _update_project_status_sync(
+                project_id,
+                status="error",
+                current_stage=config.get("_current_stage"),
+                current_crew=None,
+                last_error=f"Interrupt timeout: {e}",
+            )
+            _emit(project_id, "error", wait=True,
+                  error=f"Interrupt wait timed out: {e}",
+                  recoverable=False)
+
+        else:
+            # Generic error — original logic
+            error_msg = f"{type(e).__name__}: {e}"
+            # Capture a full error context dump BEFORE updating status so the log
+            # retains the live stack trace with the project's in-flight state.
+            try:
+                from backend.services.logging_service import log_error_context
+                log_error_context(
+                    project_id, e,
+                    stage=config.get("_current_stage"),
+                    project_name=config.get("project_name"),
+                    srs_template=config.get("srs_template"),
+                    srs_example_path=config.get("srs_example_path"),
+                )
+            except Exception:
+                pass
+
+            _update_project_status_sync(
+                project_id,
+                status="error",
+                current_stage=config.get("_current_stage"),
+                current_crew=None,
+                last_error=error_msg,
+            )
+            _emit(project_id, "error", wait=True, error=error_msg, recoverable=False)
     finally:
         _active.pop(project_id, None)
+        with _cancel_lock:
+            _cancelled_projects.discard(project_id)
         # Restore original run_with_retry
         util_mod.run_with_retry = _original_run_with_retry
+        # Unregister LLM chunk listener
+        try:
+            with crewai_event_bus._rwlock.w_locked():
+                handlers = crewai_event_bus._sync_handlers.get(LLMStreamChunkEvent, frozenset())
+                crewai_event_bus._sync_handlers[LLMStreamChunkEvent] = handlers - {_on_llm_chunk}
+        except Exception:
+            pass
         # Release the live SSE queue but keep event history in memory for
         # the TTL window so reconnecting clients can replay.
         try:

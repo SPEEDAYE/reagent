@@ -55,6 +55,16 @@ class ProjectService:
         return doc or {"error": "Project not found"}
 
     async def delete(self, project_id: str) -> dict:
+        # Cancel any running pipeline for this project before deleting data.
+        # This unblocks the worker thread (if blocked in multiline_input)
+        # and marks the pipeline for cancellation so it exits cleanly.
+        from backend.services.execution import ExecutionService
+        exec_svc = ExecutionService()
+        try:
+            await exec_svc.cancel(project_id)
+        except Exception:
+            pass  # Best-effort: don't let cancel failure block deletion
+
         r1 = await projects_col().delete_many({"project_id": project_id})
         r2 = await artifacts_col().delete_many({"project_id": project_id})
         r3 = await files_col().delete_many({"project_id": project_id})

@@ -81,12 +81,26 @@ def print_doc_content(d):
 _feedback_registry: dict[str, dict] = {}
 _stream_callback = None  # Injected by backend to emit SSE interrupt events
 
+INTERRUPT_TIMEOUT_SECONDS = 3600  # 1-hour timeout to prevent permanent block
+CANCEL_SIGNAL = "__CANCEL__"
+
+
+class PipelineCancelledError(Exception):
+    """Raised when the pipeline is cancelled by user action (e.g. project deletion)."""
+    pass
+
+
+class PipelineInterruptTimeoutError(Exception):
+    """Raised when an interrupt wait times out without receiving feedback."""
+    pass
+
 
 def register_feedback_slot(project_id: str):
     """Register a feedback wait-slot for a project (called before pipeline start)."""
     _feedback_registry[project_id] = {
         "event": threading.Event(),
         "value": None,
+        "cancelled": False,
     }
 
 
@@ -100,6 +114,18 @@ def submit_feedback(project_id: str, feedback: str):
     if slot:
         slot["value"] = feedback
         slot["event"].set()
+
+
+def cancel_feedback_slot(project_id: str) -> bool:
+    """Inject a cancel signal into the feedback slot to unblock the worker thread.
+    Returns True if the slot existed and was signalled, False otherwise."""
+    slot = _feedback_registry.get(project_id)
+    if slot is None:
+        return False
+    slot["cancelled"] = True
+    slot["value"] = CANCEL_SIGNAL
+    slot["event"].set()
+    return True
 
 
 def set_stream_callback(callback):
@@ -120,18 +146,50 @@ def multiline_input(prompt_text="请输入反馈：", project_id=None, interrupt
     CLI mode (project_id=None): blocks on terminal input (original behaviour).
     API mode (project_id set): emits an SSE interrupt event, then blocks
     the worker thread on a threading.Event until submit_feedback() is called.
+    Supports cancellation (via cancel_feedback_slot) and timeout safety.
     """
     if project_id and project_id in _feedback_registry:
         # --- API mode ---
+        slot = _feedback_registry[project_id]
+
+        # If already cancelled (e.g. project deleted before interrupt was sent),
+        # bail out immediately.
+        if slot.get("cancelled"):
+            raise PipelineCancelledError(
+                f"Pipeline for project {project_id} was cancelled"
+            )
+
         # Notify the frontend that we need input
         if interrupt_data and _stream_callback:
             _stream_callback(project_id, "interrupt", **interrupt_data)
 
-        slot = _feedback_registry[project_id]
         slot["event"].clear()
-        slot["event"].wait()  # blocks worker thread only, not the async loop
+
+        # Wait with timeout to prevent permanent block
+        timed_out = not slot["event"].wait(timeout=INTERRUPT_TIMEOUT_SECONDS)
+
+        # Re-check cancelled flag after waking (covers race with event.clear)
+        if slot.get("cancelled"):
+            raise PipelineCancelledError(
+                f"Pipeline for project {project_id} was cancelled"
+            )
+
         value = slot["value"]
         slot["value"] = None
+
+        # Check cancel signal
+        if value == CANCEL_SIGNAL:
+            raise PipelineCancelledError(
+                f"Pipeline for project {project_id} was cancelled"
+            )
+
+        # Check timeout
+        if timed_out:
+            raise PipelineInterruptTimeoutError(
+                f"Interrupt wait timed out for project {project_id} "
+                f"after {INTERRUPT_TIMEOUT_SECONDS}s"
+            )
+
         return value if value else "no"
 
     # --- CLI mode (original logic) ---
