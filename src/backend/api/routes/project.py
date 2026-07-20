@@ -3,6 +3,8 @@
 # Outline:
 #   POST   /project/create              create project (returns project_id)
 #   GET    /project/list/{user_id}      list user's projects (latest first)
+#   GET    /project/active/{user_id}    the project a returning user should
+#                                       resume (running/interrupted, else latest)
 #   GET    /project/{project_id}        fetch single project doc
 #   DELETE /project/{project_id}        cascade delete: projects + artifacts
 #                                       + files + upload_dir + output_dir
@@ -22,6 +24,13 @@ async def create_project(req: ProjectCreateRequest):
 @router.get("/list/{user_id}")
 async def list_projects(user_id: str):
     return await svc.list_by_user(user_id)
+
+
+@router.get("/active/{user_id}")
+async def active_project(user_id: str):
+    """The project a returning user should resume. Lets the frontend rediscover
+    its running/last project from the server instead of relying on localStorage."""
+    return await svc.active_for_user(user_id)
 
 
 @router.get("/{project_id}")

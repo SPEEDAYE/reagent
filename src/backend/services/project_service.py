@@ -48,6 +48,35 @@ class ProjectService:
         projects = await cursor.to_list(length=100)
         return {"projects": projects}
 
+    async def active_for_user(self, user_id: str) -> dict:
+        """Return the single project a returning user should resume.
+
+        The frontend keeps ``project_id`` only in browser localStorage, which
+        can be lost (private window, different origin, cleared storage, a
+        project started without going through create). This endpoint lets the
+        client rediscover its work from the server instead — the backend is the
+        source of truth for "what is running".
+
+        Selection priority:
+          1. A project actively needing attention (``running`` / ``interrupted``)
+          2. Otherwise the most-recently updated project
+
+        Returns ``{"active": <project doc>}`` or ``{"active": None}`` when the
+        user has no projects.
+        """
+        cursor = projects_col().find(
+            {"user_id": user_id},
+            {"_id": 0, "description": 0},
+        ).sort("updated_at", -1)
+        projects = await cursor.to_list(length=100)
+        if not projects:
+            return {"active": None}
+        for status in ("running", "interrupted"):
+            for p in projects:
+                if p.get("status") == status:
+                    return {"active": p}
+        return {"active": projects[0]}
+
     async def get(self, project_id: str) -> dict | None:
         doc = await projects_col().find_one(
             {"project_id": project_id}, {"_id": 0}
