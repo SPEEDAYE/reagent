@@ -57,17 +57,40 @@ ARTIFACT_STAGE: dict[str, str] = {
     "SRS": "srs_generation",
 }
 
-# Import dependency rules lazily to avoid circular imports
-_dep_rules = None
+# Keep API metadata lightweight. Importing ``util.DAG`` executes util's broad
+# package initializer and pulls in CLI/LLM-only dependencies such as
+# prompt_toolkit, which should not be required to browse saved artifacts.
+ARTIFACT_DEPENDENCIES: dict[str, list[str]] = {
+    "survey": [],
+    "context_diagram": ["survey"],
+    "event_list": ["context_diagram"],
+    "user_introduction": ["context_diagram"],
+    "feature_tree": ["survey"],
+    "business_scope": [
+        "feature_tree", "context_diagram", "event_list",
+        "user_introduction", "survey",
+    ],
+    "BRD": [
+        "user_introduction", "feature_tree", "event_list",
+        "context_diagram", "survey", "business_scope",
+    ],
+    "use_case": ["event_list", "user_introduction", "context_diagram"],
+    "non_functional_requirements": ["BRD"],
+    "functional_requirements": ["use_case"],
+    "data_flow_diagram": ["context_diagram", "use_case"],
+    "ERD": ["data_flow_diagram", "context_diagram"],
+    "data_dictionary": ["ERD"],
+    "state_transition_diagram": ["use_case"],
+    "dialog_map": ["use_case"],
+    "usage_scenario": ["use_case"],
+    "SRS": [],
+}
+
 _dependents_cache = None
 
 
 def _get_dep_rules():
-    global _dep_rules
-    if _dep_rules is None:
-        from util.DAG import Artifact_Dependance_rules
-        _dep_rules = Artifact_Dependance_rules
-    return _dep_rules
+    return ARTIFACT_DEPENDENCIES
 
 
 def _get_dependents():
@@ -93,15 +116,17 @@ class ArtifactService:
     def __init__(self, output_dir: str | None = None):
         self.output_dir = output_dir or settings.OUTPUT_DIR
 
-    def _project_dir(self, project_id: str) -> str:
-        """Return per-project output directory: experiment/{project_id}/"""
+    def _project_dir(self, project_id: str, run_id: str | None = None) -> str:
+        """Return the selected run directory, with legacy-layout fallback."""
+        if run_id:
+            return os.path.join(self.output_dir, project_id, "runs", run_id)
         return os.path.join(self.output_dir, project_id)
 
-    def list_all(self, project_id: str) -> dict:
+    def list_all(self, project_id: str, run_id: str | None = None) -> dict:
         rules = _get_dep_rules()
         dependents = _get_dependents()
         artifacts = []
-        pdir = self._project_dir(project_id)
+        pdir = self._project_dir(project_id, run_id)
         for name, (display, filename) in ARTIFACT_META.items():
             filepath = os.path.join(pdir, filename)
             content = _read_file(filepath)
@@ -119,6 +144,7 @@ class ArtifactService:
         completed = sum(1 for a in artifacts if a["status"] == "completed")
         return {
             "project_id": project_id,
+            "run_id": run_id,
             "artifacts": artifacts,
             "total": len(artifacts),
             "completed": completed,
@@ -126,17 +152,20 @@ class ArtifactService:
             "pending": len(artifacts) - completed,
         }
 
-    def get_content(self, project_id: str, artifact_name: str) -> dict:
+    def get_content(
+        self, project_id: str, artifact_name: str, run_id: str | None = None
+    ) -> dict:
         meta = ARTIFACT_META.get(artifact_name)
         if not meta:
             return {"error": f"Unknown artifact: {artifact_name}"}
         display, filename = meta
-        filepath = os.path.join(self._project_dir(project_id), filename)
+        filepath = os.path.join(self._project_dir(project_id, run_id), filename)
         content = _read_file(filepath)
         rules = _get_dep_rules()
         dependents = _get_dependents()
         return {
             "artifact_name": artifact_name,
+            "run_id": run_id,
             "display_name": display,
             "status": "completed" if content else "pending",
             "content": content,
@@ -144,10 +173,10 @@ class ArtifactService:
             "dependents": dependents.get(artifact_name, []),
         }
 
-    def get_dag(self, project_id: str) -> dict:
+    def get_dag(self, project_id: str, run_id: str | None = None) -> dict:
         """Return nodes + edges for frontend DAG rendering."""
         rules = _get_dep_rules()
-        pdir = self._project_dir(project_id)
+        pdir = self._project_dir(project_id, run_id)
         nodes = []
         edges = []
         for name, (display, filename) in ARTIFACT_META.items():

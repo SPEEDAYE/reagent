@@ -30,10 +30,12 @@ import json
 import time
 from collections import deque
 from datetime import datetime, timezone
+from backend.services.event_service import EventService
 
 # --- Configuration ---------------------------------------------------------
 MAX_HISTORY = 500            # keep at most N events per project (memory cap)
 HISTORY_TTL_SECONDS = 3600   # drop history 1h after pipeline terminates
+event_svc = EventService()
 
 
 class StreamManager:
@@ -53,15 +55,23 @@ class StreamManager:
         self._seq: dict[str, int] = {}
         # Per-project terminal timestamp (for TTL-based cleanup).
         self._terminated_at: dict[str, float] = {}
+        self._run_ids: dict[str, str] = {}
 
     def set_loop(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
 
     # -- queue lifecycle -------------------------------------------------
 
-    def create_queue(self, project_id: str):
+    def create_queue(self, project_id: str, run_id: str | None = None):
         """Idempotent: creates queue + history if missing."""
         self._prune_expired_history()
+        # A project may run repeatedly. A new run must never inherit the prior
+        # run's in-memory sequence or replay buffer.
+        if run_id and self._run_ids.get(project_id) != run_id:
+            self._queues[project_id] = asyncio.Queue()
+            self._history[project_id] = deque(maxlen=MAX_HISTORY)
+            self._seq[project_id] = 0
+            self._run_ids[project_id] = run_id
         if project_id not in self._queues:
             self._queues[project_id] = asyncio.Queue()
         if project_id not in self._history:
@@ -97,6 +107,15 @@ class StreamManager:
         if project_id not in self._history:
             self._history[project_id] = deque(maxlen=MAX_HISTORY)
         self._history[project_id].append(event)
+
+        # Persist lifecycle events for replay after backend restarts. Token
+        # chunks intentionally remain ephemeral to keep storage bounded.
+        try:
+            await event_svc.persist(event)
+        except Exception as exc:
+            # Event persistence must not stop a running LLM pipeline. The
+            # in-memory stream remains available and the failure is observable.
+            print(f"[stream] Failed to persist event: {exc}")
 
         # Mark terminated on final events so TTL cleanup can run.
         if event.get("type") in ("finished", "cancelled") or (
@@ -209,6 +228,7 @@ class StreamManager:
             self._history.pop(pid, None)
             self._seq.pop(pid, None)
             self._terminated_at.pop(pid, None)
+            self._run_ids.pop(pid, None)
 
 
 # Singleton used by the whole app

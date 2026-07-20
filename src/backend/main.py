@@ -3,7 +3,7 @@
 # Outline:
 #   app                       FastAPI instance (title="REagent API", v1.0.0)
 #   CORSMiddleware            allow_origins=settings.CORS_ORIGINS ("*")
-#   startup()                 on_event startup: connect MongoDB + capture
+#   startup()                 on_event startup: connect SQLite/MongoDB + capture
 #                             the main event loop for StreamManager
 #                             (critical so worker threads can schedule coroutines)
 #   shutdown()                on_event shutdown: close MongoDB
@@ -41,6 +41,8 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    from backend.services.execution import shutdown_execution_runtime
+    await shutdown_execution_runtime()
     await close_db()
 
 
@@ -54,7 +56,7 @@ async def _cleanup_zombie_projects():
 
     Sets them to 'cancelled' with a note so the frontend reflects reality.
     """
-    from backend.db.mongo import projects_col
+    from backend.db.mongo import projects_col, pipeline_runs_col
 
     zombie_statuses = ["running", "interrupted"]
     result = await projects_col().update_many(
@@ -70,3 +72,17 @@ async def _cleanup_zombie_projects():
             f"[startup] Cleaned {result.modified_count} zombie project(s) "
             f"(running/interrupted → cancelled)"
         )
+
+    run_result = await pipeline_runs_col().update_many(
+        {"status": {"$in": ["queued", "running", "interrupted"]}},
+        {
+            "$set": {
+                "status": "cancelled",
+                "last_error": "Backend restarted — worker process state lost",
+                "current_crew": None,
+            },
+            "$unset": {"active_slot": ""},
+        },
+    )
+    if run_result.modified_count > 0:
+        print(f"[startup] Cleaned {run_result.modified_count} zombie run(s)")

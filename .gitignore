@@ -12,6 +12,10 @@ venv/
 .env.*
 !.env.example
 
+data/*.db
+data/*.db-wal
+data/*.db-shm
+
 output/
 uploads/
 logs/

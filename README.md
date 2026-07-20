@@ -1,16 +1,41 @@
 # REagent
 
+Multi-user project isolation, run history and process-worker deployment are
+documented in [docs/multi-user-project-system.md](docs/multi-user-project-system.md).
+
 REagent is an AI-assisted requirements engineering system built with CrewAI and FastAPI. It turns a project description into requirements artifacts such as market research, BRD sections, use cases, non-functional requirements, diagrams, and SRS chapters.
 
 This repository has been restructured as an academic code repository. The root `main.py` is the single program entry, `script/` contains runnable scripts, `dataset/` records inputs, and `experiment/` stores one run folder per execution.
 
 ## Quick Start
 
+### Zero-setup local mode
+
+Windows users can double-click `start.bat`. On the first run it creates a
+virtual environment, installs dependencies, copies `.env.example` to `.env`,
+creates `data/reagent.db`, and starts the API. MongoDB is not required.
+
+Linux/macOS:
+
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+The default API is `http://127.0.0.1:8000` and interactive documentation is at
+`http://127.0.0.1:8000/docs`. Add an LLM API key to `.env` before starting an
+actual generation pipeline; project and version management work without one.
+
+### Manual mode
+
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
 python main.py serve --host 0.0.0.0 --port 8000
 ```
+
+SQLite is the default. Existing MongoDB deployments can set
+`DATABASE_TYPE=mongodb` and install `requirements-mongo.txt`.
 
 CLI run:
 
@@ -37,7 +62,7 @@ python main.py smoke quick
 | `baseline/` | Baseline and comparison-system notes. |
 | `experiment/` | Per-run outputs. Each run has `README.md` and `command.txt`. |
 | `src/reagent/` | CrewAI requirement-engineering pipeline. |
-| `src/backend/` | FastAPI, SSE, MongoDB, and artifact APIs. |
+| `src/backend/` | FastAPI, SSE, SQLite/MongoDB, and artifact APIs. |
 | `src/util/` | DAG, document templates, LLM config, and shared utilities. |
 | `src/config/` | Agent/task/tool/skill configuration and tool contracts. |
 | `docs/` | Code-repository docs, execution docs, design docs, visualization. |

@@ -7,9 +7,10 @@
 #                           action="confirm" → confirm_template,
 #                           action="revise" + feedback → revise_template.
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, Form
+from fastapi import APIRouter, Depends, UploadFile, File, Form
 
 from backend.services.file_service import FileService
+from backend.auth import CurrentUser, optional_current_user, require_project_owner
 
 router = APIRouter(prefix="/files", tags=["files"])
 svc = FileService()
@@ -22,6 +23,7 @@ async def upload_file(
     action: Optional[str] = Form(None),
     feedback: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
+    current_user: CurrentUser | None = Depends(optional_current_user),
 ):
     """Unified file upload endpoint.
 
@@ -30,6 +32,8 @@ async def upload_file(
     - file_type="template" + action="confirm" -> confirm template
     - file_type="template" + action="revise" + feedback -> revise template
     """
+    await require_project_owner(project_id, current_user)
+
     if file_type == "template":
         if action == "confirm":
             return await svc.confirm_template(project_id)

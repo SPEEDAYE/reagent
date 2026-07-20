@@ -1,5 +1,5 @@
 # backend/api/routes/health.py — Health check.
-# GET /health pings MongoDB and returns {status, db_connected, timestamp}.
+# GET /health pings the configured database and returns status metadata.
 from datetime import datetime, timezone
 from fastapi import APIRouter
 from backend.db.mongo import get_db

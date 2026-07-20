@@ -1,25 +1,12 @@
-"""Core execution service: wraps the CLI pipeline in a background thread,
-emitting SSE events through StreamManager and handling interrupt/resume
-via threading.Event in the patched multiline_input().
+"""Process-isolated pipeline execution with IPC-backed events and feedback.
 
 Outline:
-  _executor                 single-worker ThreadPoolExecutor (state isolation)
-  _active                   project_id → running future
+  ProcessPoolExecutor       configurable multi-project process isolation
+  Manager queues            per-project events, feedback and cancellation
+  _active / _ipc            API-process runtime registry keyed by project_id
+  StreamManager             live SSE delivery plus persisted event replay
 
-  _emit(pid, type, **kw)    publish SSE event (also updates project status
-                            to 'interrupted' on interrupt events)
-  _update_project_status_sync(pid, **fields)
-                            fire-and-forget status update via
-                            asyncio.run_coroutine_threadsafe
-
-  ExecutionService
-    start(pid, config)      register feedback slot + create queue +
-                            submit _run_pipeline to executor
-    resume(pid, resume_type, human_comment)
-                            map resume_type → feedback value; call
-                            submit_feedback() to unblock worker
-
-  _run_pipeline(pid, config) runs in worker thread:
+  _run_pipeline(pid, config) runs in a spawned worker process:
     - set cwd, load .env, set_store_path('experiment/{pid}')
     - set CREWAI_STORAGE_DIR for per-project CrewAI storage
     - monkey-patch util.run_with_retry to emit crew_start /
@@ -27,22 +14,32 @@ Outline:
     - sequentially execute 6 stages (MetaAnalysis, BR, Elicitation,
       Analysis, NonStandard, SRS Generation), emitting stage_start /
       stage_complete around each
-    - finally: restore run_with_retry, pop from _active
+    - finally: restore run_with_retry and signal the API event pump
 """
 
 import asyncio
 import os
+import queue as std_queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timezone
 
 from backend.services.stream_manager import stream_manager
 from backend.services.project_service import ProjectService
+from backend.services.run_service import RunService
+from backend.config import settings
 
-# Keep a single active worker to avoid cross-project output-path bleed while the
-# underlying CrewAI pipeline still relies on process-global path state.
-_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reagent")
-_active: dict[str, threading.Thread | asyncio.Future] = {}
+_executor: ProcessPoolExecutor | None = None
+_manager = None
+_active: dict[str, asyncio.Future] = {}
+_ipc: dict[str, dict] = {}
+# Compatibility bridge while SSE subscriptions are still keyed by project_id.
+_project_runs: dict[str, str] = {}
+
+# These are populated only inside a spawned worker process.
+_worker_event_queue = None
+_worker_cancel_event = None
 
 # Track projects that have been cancelled (e.g. via DELETE) so that
 # _patched_run_with_retry can check before each crew kickoff.
@@ -50,6 +47,96 @@ _cancelled_projects: set[str] = set()
 _cancel_lock = threading.Lock()
 
 project_svc = ProjectService()
+run_svc = RunService()
+
+
+def _get_process_runtime():
+    global _executor, _manager
+    if _manager is None:
+        context = multiprocessing.get_context("spawn")
+        _manager = context.Manager()
+    if _executor is None:
+        context = multiprocessing.get_context("spawn")
+        _executor = ProcessPoolExecutor(
+            max_workers=settings.PIPELINE_MAX_WORKERS,
+            mp_context=context,
+        )
+    return _executor, _manager
+
+
+def _ipc_probe_worker(event_queue, feedback_queue):
+    """Small picklable probe used by deployment smoke tests."""
+    worker_pid = os.getpid()
+    event_queue.put({"worker_pid": worker_pid})
+    feedback = feedback_queue.get(timeout=10)
+    return {"worker_pid": worker_pid, "feedback": feedback}
+
+
+def _ipc_test_pipeline(project_id, config, event_queue, feedback_queue, cancel_event):
+    """Deterministic lightweight worker used by concurrency integration tests."""
+    import time
+
+    run_id = config.get("_run_id")
+    worker_pid = os.getpid()
+    event_queue.put({
+        "type": "__status__",
+        "fields": {"status": "running", "current_stage": "probe"},
+    })
+    event_queue.put({
+        "type": "stage_start",
+        "project_id": project_id,
+        "run_id": run_id,
+        "stage": "probe",
+        "worker_pid": worker_pid,
+    })
+    feedback = feedback_queue.get(timeout=10)
+    if cancel_event.is_set() or feedback == "__CANCEL__":
+        event_queue.put({
+            "type": "cancelled",
+            "project_id": project_id,
+            "run_id": run_id,
+            "worker_pid": worker_pid,
+        })
+    else:
+        time.sleep(0.1)
+        event_queue.put({
+            "type": "feedback_received",
+            "project_id": project_id,
+            "run_id": run_id,
+            "feedback": feedback,
+            "worker_pid": worker_pid,
+        })
+        event_queue.put({
+            "type": "completed",
+            "project_id": project_id,
+            "run_id": run_id,
+            "worker_pid": worker_pid,
+        })
+        event_queue.put({
+            "type": "__status__",
+            "fields": {"status": "completed", "current_stage": None},
+        })
+    event_queue.put({"type": "__worker_done__"})
+
+
+async def shutdown_execution_runtime() -> None:
+    """Best-effort shutdown for worker processes and their IPC manager."""
+    global _executor, _manager
+    for ipc in list(_ipc.values()):
+        try:
+            ipc["cancel_event"].set()
+            ipc["feedback_queue"].put("__CANCEL__")
+        except Exception:
+            pass
+    if _executor is not None:
+        _executor.shutdown(wait=False, cancel_futures=True)
+        _executor = None
+    if _manager is not None:
+        try:
+            _manager.shutdown()
+        except Exception:
+            pass
+        _manager = None
 
 
 def _now() -> str:
@@ -57,18 +144,26 @@ def _now() -> str:
 
 
 def _emit(project_id: str, event_type: str, wait: bool = False, **kwargs) -> bool:
-    """Emit an SSE event from a worker thread AND mirror to per-project log."""
+    """Emit through process IPC (worker) or directly to SSE (API process)."""
     if event_type == "interrupt":
         _update_project_status_sync(
             project_id,
             status="interrupted",
             current_crew=None,
         )
-    future = stream_manager.publish_sync(project_id, {
+    run_id = _project_runs.get(project_id)
+    event = {
         "type": event_type,
         "project_id": project_id,
+        **({"run_id": run_id} if run_id else {}),
         **kwargs,
-    })
+    }
+    if _worker_event_queue is not None:
+        event.setdefault("timestamp", _now())
+        _worker_event_queue.put(event)
+        future = None
+    else:
+        future = stream_manager.publish_sync(project_id, event)
     delivered = True
     if wait and future is not None:
         try:
@@ -96,67 +191,144 @@ def _emit(project_id: str, event_type: str, wait: bool = False, **kwargs) -> boo
     return delivered
 
 
+async def _update_project_and_run(project_id: str, run_id: str | None, **fields):
+    await project_svc.update_status(project_id, **fields)
+    if run_id:
+        await run_svc.update_status(run_id, **fields)
+
+
 def _update_project_status_sync(project_id: str, **fields):
-    """Update project status from a worker thread via the main event loop."""
+    """Mirror status through IPC or the API event loop."""
     loop = stream_manager._loop
     if loop is None:
+        if _worker_event_queue is not None:
+            _worker_event_queue.put({
+                "type": "__status__",
+                "project_id": project_id,
+                "run_id": _project_runs.get(project_id),
+                "fields": fields,
+            })
         return
     asyncio.run_coroutine_threadsafe(
-        project_svc.update_status(project_id, **fields), loop
+        _update_project_and_run(
+            project_id, _project_runs.get(project_id), **fields
+        ), loop
     )
 
 
 class ExecutionService:
 
-    async def start(self, project_id: str, config: dict):
+    def __init__(self, worker_target=None):
+        self._worker_target = worker_target or _run_pipeline
+
+    async def start(self, project_id: str, config: dict, run_id: str | None = None):
         if project_id in _active:
             raise RuntimeError(f"Project {project_id} is already running")
 
-        # Auto-cancel any running project so the new one can start immediately.
-        # With a single-worker executor, only one pipeline can run at a time;
-        # the user expects that starting a new pipeline supersedes the old one.
-        if _active:
-            old_pid = next(iter(_active))
-            old_future = _active.get(old_pid)
-            print(f"[execution] Auto-cancelling running project {old_pid} "
-                  f"to start new project {project_id}")
-            await self.cancel(old_pid)
-            # Wait for the old worker thread to actually exit so the
-            # single-worker executor is free for the new pipeline.
-            if old_future is not None:
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(old_future), timeout=15
-                    )
-                except (asyncio.TimeoutError, Exception):
-                    pass  # Worker cancelled; TimeoutError is expected
-
-        # Register feedback slot for this project
-        from util.util import register_feedback_slot, set_stream_callback
-        register_feedback_slot(project_id)
-        set_stream_callback(_emit)
+        executor, manager = _get_process_runtime()
+        event_queue = manager.Queue()
+        feedback_queue = manager.Queue()
+        cancel_event = manager.Event()
 
         # Create SSE queue
-        stream_manager.create_queue(project_id)
+        stream_manager.create_queue(project_id, run_id=run_id)
+        if run_id:
+            _project_runs[project_id] = run_id
+            config["_run_id"] = run_id
 
         # Ensure the stream manager knows the main loop
         loop = asyncio.get_event_loop()
         stream_manager.set_loop(loop)
 
-        # Update project status
+        # The process pool may queue this run until a worker becomes free.
         await project_svc.update_status(
-            project_id, status="running", current_stage="meta_analysis"
+            project_id,
+            status="queued",
+            current_stage=None,
+            current_run_id=run_id,
         )
+        if run_id:
+            await run_svc.update_status(run_id, status="queued", current_stage=None)
+        await stream_manager.publish(project_id, {
+            "type": "queued",
+            "project_id": project_id,
+            "run_id": run_id,
+            "message": "Pipeline entered the process-worker queue",
+        })
 
         future = loop.run_in_executor(
-            _executor, _run_pipeline, project_id, config
+            executor,
+            self._worker_target,
+            project_id,
+            config,
+            event_queue,
+            feedback_queue,
+            cancel_event,
         )
         _active[project_id] = future
+        _ipc[project_id] = {
+            "run_id": run_id,
+            "event_queue": event_queue,
+            "feedback_queue": feedback_queue,
+            "cancel_event": cancel_event,
+        }
+        _ipc[project_id]["pump_task"] = loop.create_task(
+            self._pump_worker_events(project_id, run_id, event_queue, future)
+        )
+
+    async def _pump_worker_events(
+        self, project_id: str, run_id: str | None, event_queue, future
+    ) -> None:
+        """Bridge process-safe worker events into SSE and persistent storage."""
+        terminal_seen = False
+        try:
+            while True:
+                try:
+                    event = await asyncio.to_thread(event_queue.get, True, 1)
+                except std_queue.Empty:
+                    if future.done():
+                        break
+                    continue
+                event_type = event.get("type")
+                if event_type == "__worker_done__":
+                    break
+                if event_type == "__status__":
+                    await _update_project_and_run(
+                        project_id, run_id, **event.get("fields", {})
+                    )
+                    continue
+                terminal_seen = terminal_seen or event_type in {
+                    "completed", "finished", "cancelled"
+                } or (event_type == "error" and not event.get("recoverable", False))
+                await stream_manager.publish(project_id, event)
+
+            try:
+                await future
+            except Exception as exc:
+                if not terminal_seen:
+                    error = f"Worker process failed: {type(exc).__name__}: {exc}"
+                    await _update_project_and_run(
+                        project_id,
+                        run_id,
+                        status="error",
+                        current_crew=None,
+                        last_error=error,
+                    )
+                    await stream_manager.publish(project_id, {
+                        "type": "error",
+                        "project_id": project_id,
+                        "run_id": run_id,
+                        "error": error,
+                        "recoverable": False,
+                    })
+        finally:
+            _active.pop(project_id, None)
+            _ipc.pop(project_id, None)
+            _project_runs.pop(project_id, None)
+            stream_manager.remove_queue(project_id)
 
     async def resume(self, project_id: str, resume_type: str,
                      human_comment: str | None = None, **kwargs):
-        from util.util import submit_feedback
-
         # UX semantics:
         #   "accept"        -> no feedback, proceed to next step (-> "no")
         #   "feedback"      -> the human_comment is the feedback text; pipeline
@@ -170,53 +342,39 @@ class ExecutionService:
             "redo_artifact": human_comment or "redo",
         }
         value = feedback_map.get(resume_type, "no")
+        ipc = _ipc.get(project_id)
+        if not ipc:
+            raise RuntimeError("Pipeline worker is not active; it may have restarted")
         await project_svc.update_status(project_id, status="running")
-        submit_feedback(project_id, value)
-        return {"status": "resumed", "project_id": project_id}
+        ipc["feedback_queue"].put(value)
+        run_id = _project_runs.get(project_id)
+        if run_id:
+            await run_svc.update_status(run_id, status="running")
+        return {"status": "resumed", "project_id": project_id, "run_id": run_id}
 
     async def cancel(self, project_id: str) -> dict:
-        """Cancel a running or queued pipeline.
-
-        Strategy:
-          - Mark the project as cancelled so _patched_run_with_retry can
-            check before the next crew kickoff.
-          - Inject CANCEL_SIGNAL via cancel_feedback_slot() to unblock a
-            worker that is waiting in multiline_input().
-          - Clean up residual state if the project is not in _active.
-        """
-        from util.util import cancel_feedback_slot, unregister_feedback_slot
-
+        """Signal cancellation across the worker-process boundary."""
         result = {"project_id": project_id, "action": "none"}
-
-        # 1. Mark as cancelled (checked by _patched_run_with_retry)
-        with _cancel_lock:
-            _cancelled_projects.add(project_id)
-
-        # 2. Inject cancel signal to unblock worker in multiline_input()
-        signalled = cancel_feedback_slot(project_id)
-
-        # 3. Clean up based on whether project is active
-        if project_id in _active:
-            # Immediately remove from _active so that start() won't reject
-            # new projects while the worker thread is still unwinding.
-            _active.pop(project_id, None)
-            result["action"] = "cancel_signalled" if signalled else "cancel_marked"
-        else:
-            # Project already finished or never started — just clean up residual state
-            unregister_feedback_slot(project_id)
-            try:
-                stream_manager.remove_queue(project_id)
-            except Exception:
-                pass
-            with _cancel_lock:
-                _cancelled_projects.discard(project_id)
+        ipc = _ipc.get(project_id)
+        run_id = _project_runs.get(project_id)
+        if not ipc:
             result["action"] = "cleaned_up"
-
+            return result
+        ipc["cancel_event"].set()
+        ipc["feedback_queue"].put("__CANCEL__")
+        result["action"] = "cancel_signalled"
+        await project_svc.update_status(
+            project_id, status="cancelled", current_stage=None, current_crew=None
+        )
+        if run_id:
+            await run_svc.update_status(
+                run_id, status="cancelled", current_stage=None, current_crew=None
+            )
         return result
 
 
 # ---------------------------------------------------------------------------
-# Pipeline runner (runs in a worker thread, NOT on the async event loop)
+# Pipeline runner (runs in a spawned worker process)
 # ---------------------------------------------------------------------------
 
 def _write_run_metadata(project_root, project_id: str, config: dict, project_output: str) -> None:
@@ -247,8 +405,15 @@ def _write_run_metadata(project_root, project_id: str, config: dict, project_out
     )
 
 
-def _run_pipeline(project_id: str, config: dict):
-    """Execute the full RE pipeline synchronously in a worker thread."""
+def _run_pipeline(
+    project_id: str,
+    config: dict,
+    event_queue=None,
+    feedback_queue=None,
+    cancel_event=None,
+):
+    """Execute one pipeline in an isolated spawned worker process."""
+    global _worker_event_queue, _worker_cancel_event
     import sys
     import os
     import warnings
@@ -267,13 +432,63 @@ def _run_pipeline(project_id: str, config: dict):
     from dotenv import load_dotenv
     load_dotenv(str(project_root / ".env"))
 
-    # --- Set per-project output directory (thread-safe) ---
+    _worker_event_queue = event_queue
+    _worker_cancel_event = cancel_event
+    run_id = config.get("_run_id")
+    if run_id:
+        _project_runs[project_id] = run_id
+
+    # Keep the existing multiline_input implementation inside the worker, and
+    # relay feedback/cancellation from process-safe IPC into its local Event.
+    from util.util import (
+        cancel_feedback_slot,
+        register_feedback_slot,
+        set_stream_callback,
+        submit_feedback,
+        unregister_feedback_slot,
+    )
+    register_feedback_slot(project_id)
+    set_stream_callback(_emit)
+
+    def _feedback_relay():
+        if feedback_queue is None:
+            return
+        while True:
+            try:
+                value = feedback_queue.get()
+            except (EOFError, OSError):
+                cancel_feedback_slot(project_id)
+                return
+            if value == "__CANCEL__":
+                cancel_feedback_slot(project_id)
+                return
+            submit_feedback(project_id, value)
+
+    feedback_thread = threading.Thread(
+        target=_feedback_relay,
+        name=f"reagent-feedback-{project_id}",
+        daemon=True,
+    )
+    feedback_thread.start()
+
+    _update_project_status_sync(
+        project_id,
+        status="running",
+        current_stage="meta_analysis",
+        current_crew=None,
+    )
+
+    # --- Set per-run output directory (process-isolated) ---
     # Use relative path (relative to cwd which is project_root) because
     # CrewAI's output_file concatenates cwd + output_file path
     from util.util import set_store_path
-    project_output = os.path.join("experiment", project_id)
+    project_output = (
+        os.path.join("experiment", project_id, "runs", run_id)
+        if run_id
+        else os.path.join("experiment", project_id)
+    )
     set_store_path(project_output)
-    os.environ["REAGENT_RUN_ID"] = project_id
+    os.environ["REAGENT_RUN_ID"] = run_id or project_id
     os.environ["REAGENT_MODEL_ID"] = (
         os.getenv("LLM_MODEL")
         or os.getenv("OPENAI_MODEL")
@@ -309,7 +524,7 @@ def _run_pipeline(project_id: str, config: dict):
 
     crewai_event_bus.register_handler(LLMStreamChunkEvent, _on_llm_chunk)
 
-    # Register run_with_retry event hooks via thread-local
+    # Register run_with_retry event hooks inside this isolated process.
     from util import run_with_retry  # noqa: F401
     import util as util_mod
 
@@ -321,11 +536,14 @@ def _run_pipeline(project_id: str, config: dict):
         # Cancel check: if the project has been marked for cancellation,
         # abort before starting the next crew.
         with _cancel_lock:
-            if project_id in _cancelled_projects:
-                from util.util import PipelineCancelledError
-                raise PipelineCancelledError(
-                    f"Pipeline for project {project_id} was cancelled"
-                )
+            cancelled = project_id in _cancelled_projects
+        if _worker_cancel_event is not None:
+            cancelled = cancelled or _worker_cancel_event.is_set()
+        if cancelled:
+            from util.util import PipelineCancelledError
+            raise PipelineCancelledError(
+                f"Pipeline for project {project_id} was cancelled"
+            )
 
         _current_crew_name[0] = name  # track for token events
 
@@ -557,7 +775,7 @@ def _run_pipeline(project_id: str, config: dict):
             )
             _emit(project_id, "error", wait=True, error=error_msg, recoverable=False)
     finally:
-        _active.pop(project_id, None)
+        unregister_feedback_slot(project_id)
         with _cancel_lock:
             _cancelled_projects.discard(project_id)
         # Restore original run_with_retry
@@ -569,9 +787,8 @@ def _run_pipeline(project_id: str, config: dict):
                 crewai_event_bus._sync_handlers[LLMStreamChunkEvent] = handlers - {_on_llm_chunk}
         except Exception:
             pass
-        # Release the live SSE queue but keep event history in memory for
-        # the TTL window so reconnecting clients can replay.
-        try:
-            stream_manager.remove_queue(project_id)
-        except Exception:
-            pass
+        if _worker_event_queue is not None:
+            _worker_event_queue.put({"type": "__worker_done__"})
+        _project_runs.pop(project_id, None)
+        _worker_event_queue = None
+        _worker_cancel_event = None
