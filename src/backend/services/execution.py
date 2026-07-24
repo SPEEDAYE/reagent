@@ -23,6 +23,7 @@ import queue as std_queue
 import threading
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
 
 from backend.services.stream_manager import stream_manager
@@ -32,6 +33,7 @@ from backend.config import settings
 
 _executor: ProcessPoolExecutor | None = None
 _manager = None
+_runtime_lock = threading.Lock()
 _active: dict[str, asyncio.Future] = {}
 _ipc: dict[str, dict] = {}
 # Compatibility bridge while SSE subscriptions are still keyed by project_id.
@@ -52,16 +54,39 @@ run_svc = RunService()
 
 def _get_process_runtime():
     global _executor, _manager
-    if _manager is None:
-        context = multiprocessing.get_context("spawn")
-        _manager = context.Manager()
-    if _executor is None:
-        context = multiprocessing.get_context("spawn")
-        _executor = ProcessPoolExecutor(
-            max_workers=settings.PIPELINE_MAX_WORKERS,
-            mp_context=context,
-        )
-    return _executor, _manager
+    with _runtime_lock:
+        if _manager is None:
+            context = multiprocessing.get_context("spawn")
+            _manager = context.Manager()
+        if _executor is None:
+            context = multiprocessing.get_context("spawn")
+            _executor = ProcessPoolExecutor(
+                max_workers=settings.PIPELINE_MAX_WORKERS,
+                mp_context=context,
+            )
+        return _executor, _manager
+
+
+def _discard_broken_executor(expected_executor=None) -> bool:
+    """Drop a poisoned process pool so the next submission gets a fresh one.
+
+    ``ProcessPoolExecutor`` cannot be reused after any worker exits abruptly.
+    Several event pumps can observe the same failure concurrently, therefore
+    only the pump that still owns the current executor is allowed to clear it.
+    """
+    global _executor
+    with _runtime_lock:
+        if _executor is None:
+            return False
+        if expected_executor is not None and _executor is not expected_executor:
+            return False
+        broken_executor = _executor
+        _executor = None
+    try:
+        broken_executor.shutdown(wait=False, cancel_futures=True)
+    except Exception:
+        pass
+    return True
 
 
 def _ipc_probe_worker(event_queue, feedback_queue):
@@ -256,15 +281,38 @@ class ExecutionService:
             "message": "Pipeline entered the process-worker queue",
         })
 
-        future = loop.run_in_executor(
-            executor,
-            self._worker_target,
-            project_id,
-            config,
-            event_queue,
-            feedback_queue,
-            cancel_event,
-        )
+        try:
+            future = loop.run_in_executor(
+                executor,
+                self._worker_target,
+                project_id,
+                config,
+                event_queue,
+                feedback_queue,
+                cancel_event,
+            )
+        except BrokenProcessPool:
+            # A previous worker crash poisons the whole executor. This task was
+            # rejected before submission, so rebuilding and retrying it once is
+            # safe and does not duplicate pipeline work.
+            _discard_broken_executor(executor)
+            executor, _ = _get_process_runtime()
+            try:
+                future = loop.run_in_executor(
+                    executor,
+                    self._worker_target,
+                    project_id,
+                    config,
+                    event_queue,
+                    feedback_queue,
+                    cancel_event,
+                )
+            except BrokenProcessPool as exc:
+                _discard_broken_executor(executor)
+                raise RuntimeError(
+                    "Pipeline process pool could not be restarted; "
+                    "please retry after checking worker memory and logs"
+                ) from exc
         _active[project_id] = future
         _ipc[project_id] = {
             "run_id": run_id,
@@ -273,11 +321,18 @@ class ExecutionService:
             "cancel_event": cancel_event,
         }
         _ipc[project_id]["pump_task"] = loop.create_task(
-            self._pump_worker_events(project_id, run_id, event_queue, future)
+            self._pump_worker_events(
+                project_id, run_id, event_queue, future, executor
+            )
         )
 
     async def _pump_worker_events(
-        self, project_id: str, run_id: str | None, event_queue, future
+        self,
+        project_id: str,
+        run_id: str | None,
+        event_queue,
+        future,
+        executor,
     ) -> None:
         """Bridge process-safe worker events into SSE and persistent storage."""
         terminal_seen = False
@@ -305,8 +360,17 @@ class ExecutionService:
             try:
                 await future
             except Exception as exc:
+                if isinstance(exc, BrokenProcessPool):
+                    _discard_broken_executor(executor)
                 if not terminal_seen:
-                    error = f"Worker process failed: {type(exc).__name__}: {exc}"
+                    if isinstance(exc, BrokenProcessPool):
+                        error = (
+                            "Worker process exited unexpectedly; the process pool "
+                            "was reset automatically. Check worker memory/native "
+                            "dependency logs, then start the pipeline again."
+                        )
+                    else:
+                        error = f"Worker process failed: {type(exc).__name__}: {exc}"
                     await _update_project_and_run(
                         project_id,
                         run_id,
