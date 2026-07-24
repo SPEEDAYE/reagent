@@ -31,6 +31,9 @@ def get_srs_IEEE_Template(authors: str = 'csl'):
 def get_srs_Initial_Template(authors: str = 'csl'):
     return Create_SRS_Initial_Template(authors=authors)
 
+import ctypes
+import gc
+import os
 import time
 
 
@@ -42,6 +45,22 @@ def _progress(stage: str, message: str, *, current: int | None = None, total: in
         prefix = f"[{stage}]"
         detail = f" ({current}/{total})" if current is not None and total is not None else ""
         print(f"{prefix}{detail} {message}")
+
+
+def _release_crew_memory() -> None:
+    """Release cyclic Crew objects and return free glibc pages to Linux."""
+    gc.collect()
+    if os.name != "posix":
+        return
+    try:
+        libc = ctypes.CDLL(None)
+        malloc_trim = getattr(libc, "malloc_trim", None)
+        if malloc_trim is not None:
+            malloc_trim(0)
+    except (AttributeError, OSError):
+        # malloc_trim is a glibc optimisation; other POSIX runtimes can skip it.
+        pass
+
 
 def run_with_retry(
     crew_callable,
@@ -55,9 +74,13 @@ def run_with_retry(
     last_error = None
 
     for attempt in range(1, retries + 1):
+        crew_instance = None
+        crew_runner = None
         try:
             _progress("crew_attempt", name, current=attempt, total=retries)
-            crew_callable().crew().kickoff(inputs=inputs)
+            crew_instance = crew_callable()
+            crew_runner = crew_instance.crew()
+            crew_runner.kickoff(inputs=inputs)
 
             _progress("crew_success", name)
 
@@ -85,6 +108,14 @@ def run_with_retry(
                 raise Exception(
                     f"[{name}] Failed after {retries} retries: {last_error}"
                 )
+        finally:
+            # CrewAI objects contain agents, tasks, callbacks and HTTP clients.
+            # Explicitly break the local reference chain between chapter calls;
+            # otherwise long SRS runs can retain enough native heap for the
+            # operating system to terminate the pipeline worker.
+            crew_runner = None
+            crew_instance = None
+            _release_crew_memory()
 
 
 # def get_reference(reference: list):

@@ -27,6 +27,7 @@ import warnings
 from datetime import datetime
 import os
 from pathlib import Path
+import hashlib
 import json
 import pickle
 import time
@@ -50,6 +51,31 @@ from reagent.logger import log_event
 from reagent.progress import TerminalProgress
 
 
+def _write_srs_completion_marker(chapter_count: int) -> None:
+    """Commit proof that every SRS chapter and final files reached disk."""
+    store_path = Path(get_store_path())
+    srs_path = store_path / "SRS.md"
+    pickle_path = store_path / "SRS.pkl"
+    marker_dir = store_path / ".pipeline"
+    marker_dir.mkdir(parents=True, exist_ok=True)
+    marker_path = marker_dir / "srs_complete.json"
+    marker_temp = marker_dir / "srs_complete.json.tmp"
+    payload = {
+        "completed": True,
+        "chapter_count": chapter_count,
+        "completed_at": datetime.now().astimezone().isoformat(),
+        "files": {
+            "SRS.md": hashlib.sha256(srs_path.read_bytes()).hexdigest(),
+            "SRS.pkl": hashlib.sha256(pickle_path.read_bytes()).hexdigest(),
+        },
+    }
+    marker_temp.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    marker_temp.replace(marker_path)
+
+
 def RequirementSpecificationrun(document_template, document_skeleton, doc_content, chapter_dependence, SRS_Reference, srs_example_path):
     from RequirementSpecification import SRSev, SRSplaningCrew
     chapter_sequence = topological_sort(chapter_dependence)
@@ -68,6 +94,11 @@ def RequirementSpecificationrun(document_template, document_skeleton, doc_conten
             pickle.dump(SRS, f)
         with open(f"{get_store_path()}/SRS.md", "w", encoding="utf-8") as f:
             f.write(f"{SRS.get_whole_document(only_show_written = True)}{get_dependence_appendix(SRS_Reference)}")
+        # Commit completion before CrewAI disposes the final chapter's browser
+        # resources. A native Chromium crash during cleanup must not erase the
+        # fact that every chapter and both final artifacts already reached disk.
+        if i == len(chapter_sequence) - 1:
+            _write_srs_completion_marker(len(chapter_sequence))
     SRS_chapter_dict = {}
     SRS_example = split_markdown_by_h2(read_markdown(srs_example_path))
     for i, chapter in enumerate(chapter_sequence):
@@ -99,6 +130,7 @@ def RequirementSpecificationrun(document_template, document_skeleton, doc_conten
         SRS_chapter_dict[chapter] = get_SRS_chapter()
     with open(f"{get_store_path()}/SRS.md", "w", encoding="utf-8") as f:
         f.write(f"{SRS.get_whole_document(only_show_written = True)}{get_dependence_appendix(SRS_Reference)}")
+    _write_srs_completion_marker(len(chapter_sequence))
 
 
 # 示例1： 课程安排系统

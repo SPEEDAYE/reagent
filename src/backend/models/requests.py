@@ -45,6 +45,10 @@ class StreamResumeRequest(BaseModel):
     prune_downstream: Optional[bool] = False
 
 
+class StreamInterruptActivityRequest(BaseModel):
+    project_id: str
+
+
 class StreamCancelRequest(BaseModel):
     project_id: str
 

@@ -18,6 +18,8 @@ Outline:
 """
 
 import asyncio
+import hashlib
+import json
 import os
 import queue as std_queue
 import threading
@@ -51,6 +53,74 @@ _cancel_lock = threading.Lock()
 
 project_svc = ProjectService()
 run_svc = RunService()
+
+
+def _srs_completion_marker(project_id: str, run_id: str | None) -> dict | None:
+    """Return a verified SRS commit marker, never infer completion from existence."""
+    output_dir = (
+        os.path.join(settings.OUTPUT_DIR, project_id, "runs", run_id)
+        if run_id
+        else os.path.join(settings.OUTPUT_DIR, project_id)
+    )
+    marker_path = os.path.join(output_dir, ".pipeline", "srs_complete.json")
+    try:
+        with open(marker_path, "r", encoding="utf-8") as marker_file:
+            marker = json.load(marker_file)
+        if marker.get("completed") is not True or marker.get("chapter_count", 0) < 1:
+            return None
+        expected_files = marker.get("files") or {}
+        for filename in ("SRS.md", "SRS.pkl"):
+            expected_hash = expected_files.get(filename)
+            if not expected_hash:
+                return None
+            digest = hashlib.sha256()
+            with open(os.path.join(output_dir, filename), "rb") as artifact_file:
+                for chunk in iter(lambda: artifact_file.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != expected_hash:
+                return None
+        return marker
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+async def _reconcile_completed_srs(project_id: str, run_id: str | None) -> bool:
+    if not _srs_completion_marker(project_id, run_id):
+        return False
+    await _update_project_and_run(
+        project_id,
+        run_id,
+        status="completed",
+        current_stage=None,
+        current_crew=None,
+        last_error=None,
+    )
+    shared = {
+        "project_id": project_id,
+        "run_id": run_id,
+        "reconciled_after_worker_exit": True,
+    }
+    await stream_manager.publish(project_id, {
+        "type": "artifact_complete",
+        "crew_name": "SRS",
+        "stage": "srs_generation",
+        **_artifact_event_fields("SRS"),
+        **shared,
+    })
+    await stream_manager.publish(project_id, {
+        "type": "stage_complete",
+        "stage": "srs_generation",
+        **shared,
+    })
+    completion = {
+        "status": "completed",
+        "total_artifacts": 17,
+        "srs_generated": True,
+        **shared,
+    }
+    await stream_manager.publish(project_id, {"type": "completed", **completion})
+    await stream_manager.publish(project_id, {"type": "finished", **completion})
+    return True
 
 # CrewAI 执行名 -> 后端标准制品键。未列出的 Crew 都是内部步骤，
 # 只能发送 crew_start/crew_complete，不能伪装成 artifact_complete。
@@ -211,6 +281,12 @@ def _emit(project_id: str, event_type: str, wait: bool = False, **kwargs) -> boo
         _update_project_status_sync(
             project_id,
             status="interrupted",
+            current_crew=None,
+        )
+    elif event_type == "interrupt_auto_skipped":
+        _update_project_status_sync(
+            project_id,
+            status="running",
             current_crew=None,
         )
     run_id = _project_runs.get(project_id)
@@ -400,6 +476,12 @@ class ExecutionService:
                 if isinstance(exc, BrokenProcessPool):
                     _discard_broken_executor(executor)
                 if not terminal_seen:
+                    if (
+                        isinstance(exc, BrokenProcessPool)
+                        and await _reconcile_completed_srs(project_id, run_id)
+                    ):
+                        terminal_seen = True
+                        return
                     if isinstance(exc, BrokenProcessPool):
                         error = (
                             "Worker process exited unexpectedly; the process pool "
@@ -471,6 +553,17 @@ class ExecutionService:
             "project_id": project_id,
             "run_id": run_id,
             "target_artifacts": targets,
+        }
+
+    async def mark_interrupt_active(self, project_id: str) -> dict:
+        ipc = _ipc.get(project_id)
+        if not ipc:
+            raise RuntimeError("Pipeline worker is not active; it may have restarted")
+        ipc["feedback_queue"].put("__HUMAN_ACTIVE__")
+        return {
+            "status": "activity_acknowledged",
+            "project_id": project_id,
+            "run_id": _project_runs.get(project_id),
         }
 
     async def cancel(self, project_id: str) -> dict:
@@ -829,6 +922,12 @@ def _run_pipeline(
         )
         _emit(project_id, "stage_start", stage="srs_generation",
               stage_index=6, total_stages=6, stage_label="SRS 生成阶段")
+
+        # A run id is normally unique, but remove any stale proof before SRS
+        # starts so recovery can only accept this execution's final commit.
+        (
+            Path(project_output) / ".pipeline" / "srs_complete.json"
+        ).unlink(missing_ok=True)
 
         # 必须使用包路径；仓库根目录也有 main.py（统一启动脚本），
         # ``from main`` 会错误导入该文件并导致 ImportError。

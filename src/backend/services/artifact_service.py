@@ -13,6 +13,7 @@
 #     get_content(pid, name) full markdown + deps for a single artifact
 #     get_dag(pid)           nodes+edges payload for frontend DAG viz
 import os
+import tempfile
 from backend.config import settings
 
 # Artifact name -> (display_name, filename)
@@ -172,6 +173,39 @@ class ArtifactService:
             "dependencies": rules.get(artifact_name, []),
             "dependents": dependents.get(artifact_name, []),
         }
+
+    def write_content(
+        self,
+        project_id: str,
+        artifact_name: str,
+        content: str,
+        run_id: str | None = None,
+    ) -> str:
+        """Atomically update the artifact file consumed by later pipeline stages."""
+        meta = ARTIFACT_META.get(artifact_name)
+        if not meta:
+            raise ValueError(f"Unknown artifact: {artifact_name}")
+        _, filename = meta
+        project_dir = self._project_dir(project_id, run_id)
+        os.makedirs(project_dir, exist_ok=True)
+        filepath = os.path.join(project_dir, filename)
+        temp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=project_dir,
+                prefix=f".{filename}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                temp_file.write(content)
+                temp_path = temp_file.name
+            os.replace(temp_path, filepath)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+        return filepath
 
     def get_dag(self, project_id: str, run_id: str | None = None) -> dict:
         """Return nodes + edges for frontend DAG rendering."""

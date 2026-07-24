@@ -9,7 +9,6 @@ from landingai_ade import LandingAIADE
 import os
 from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task
-from crewai_tools import WebsiteSearchTool
 from util.SoftwareManager import SoftwareManagerCrew
 from util.util import get_store_path
 from util import *
@@ -106,4 +105,3 @@ def parse_folder_into_md(root_dir: str):
 
     return result
 
-                

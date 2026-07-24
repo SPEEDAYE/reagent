@@ -152,7 +152,7 @@ async def create_artifact_version(
     selected_run_id = await _selected_run_id(project, run_id)
     data = _artifact_file(project_id, artifact_name, selected_run_id)
     try:
-        return await version_svc.create_version(
+        saved = await version_svc.create_version(
             project_id,
             selected_run_id,
             artifact_name,
@@ -163,6 +163,10 @@ async def create_artifact_version(
             based_on_version=req.based_on_version,
             change_summary=req.change_summary,
         )
+        svc.write_content(
+            project_id, artifact_name, saved["content"], selected_run_id
+        )
+        return saved
     except ArtifactVersionConflict as error:
         raise _version_error(error) from error
 
@@ -232,7 +236,7 @@ async def restore_artifact_version(
         project_id, selected_run_id, artifact_name, data.get("content", "")
     )
     try:
-        return await version_svc.restore_version(
+        restored = await version_svc.restore_version(
             project_id,
             selected_run_id,
             artifact_name,
@@ -242,6 +246,10 @@ async def restore_artifact_version(
             base_version=req.base_version,
             change_summary=req.change_summary,
         )
+        svc.write_content(
+            project_id, artifact_name, restored["content"], selected_run_id
+        )
+        return restored
     except (ArtifactVersionConflict, ArtifactVersionNotFound) as error:
         raise _version_error(error) from error
 

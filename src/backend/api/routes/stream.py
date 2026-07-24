@@ -21,6 +21,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend.models.requests import (
     StreamCancelRequest,
     StreamCreateRequest,
+    StreamInterruptActivityRequest,
     StreamResumeRequest,
 )
 from backend.services.execution import ExecutionService
@@ -95,6 +96,19 @@ async def stream_resume(
             target_artifacts=req.target_artifacts,
             prune_downstream=req.prune_downstream,
         )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/stream/interrupt/activity")
+async def stream_interrupt_activity(
+    req: StreamInterruptActivityRequest,
+    current_user: CurrentUser | None = Depends(optional_current_user),
+):
+    """Cancel the 60-second auto-skip after a user starts reviewing."""
+    await require_project_owner(req.project_id, current_user)
+    try:
+        return await exec_svc.mark_interrupt_active(req.project_id)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

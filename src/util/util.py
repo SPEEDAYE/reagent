@@ -81,8 +81,10 @@ def print_doc_content(d):
 _feedback_registry: dict[str, dict] = {}
 _stream_callback = None  # Injected by backend to emit SSE interrupt events
 
-INTERRUPT_TIMEOUT_SECONDS = 3600  # 1-hour timeout to prevent permanent block
+INTERRUPT_AUTO_SKIP_SECONDS = 60
+INTERRUPT_ACTIVE_TIMEOUT_SECONDS = 3600
 CANCEL_SIGNAL = "__CANCEL__"
+HUMAN_ACTIVE_SIGNAL = "__HUMAN_ACTIVE__"
 
 
 class PipelineCancelledError(Exception):
@@ -159,38 +161,60 @@ def multiline_input(prompt_text="请输入反馈：", project_id=None, interrupt
                 f"Pipeline for project {project_id} was cancelled"
             )
 
-        # Notify the frontend that we need input
-        if interrupt_data and _stream_callback:
-            _stream_callback(project_id, "interrupt", **interrupt_data)
-
+        slot["value"] = None
         slot["event"].clear()
 
-        # Wait with timeout to prevent permanent block
-        timed_out = not slot["event"].wait(timeout=INTERRUPT_TIMEOUT_SECONDS)
-
-        # Re-check cancelled flag after waking (covers race with event.clear)
-        if slot.get("cancelled"):
-            raise PipelineCancelledError(
-                f"Pipeline for project {project_id} was cancelled"
+        # Notify only after clearing the slot, otherwise a very fast response
+        # can be erased before wait() begins.
+        if interrupt_data and _stream_callback:
+            _stream_callback(
+                project_id,
+                "interrupt",
+                auto_skip_seconds=INTERRUPT_AUTO_SKIP_SECONDS,
+                **interrupt_data,
             )
 
-        value = slot["value"]
-        slot["value"] = None
-
-        # Check cancel signal
-        if value == CANCEL_SIGNAL:
-            raise PipelineCancelledError(
-                f"Pipeline for project {project_id} was cancelled"
+        human_active = False
+        while True:
+            timeout = (
+                INTERRUPT_ACTIVE_TIMEOUT_SECONDS
+                if human_active
+                else INTERRUPT_AUTO_SKIP_SECONDS
             )
+            timed_out = not slot["event"].wait(timeout=timeout)
 
-        # Check timeout
-        if timed_out:
-            raise PipelineInterruptTimeoutError(
-                f"Interrupt wait timed out for project {project_id} "
-                f"after {INTERRUPT_TIMEOUT_SECONDS}s"
-            )
+            # Re-check cancelled flag after waking.
+            if slot.get("cancelled"):
+                raise PipelineCancelledError(
+                    f"Pipeline for project {project_id} was cancelled"
+                )
 
-        return value if value else "no"
+            if timed_out:
+                if not human_active:
+                    emit_event(
+                        project_id,
+                        "interrupt_auto_skipped",
+                        resume_type="skip",
+                    )
+                    return "no"
+                raise PipelineInterruptTimeoutError(
+                    f"Active interrupt wait timed out for project {project_id} "
+                    f"after {INTERRUPT_ACTIVE_TIMEOUT_SECONDS}s"
+                )
+
+            value = slot["value"]
+            slot["value"] = None
+            slot["event"].clear()
+
+            if value == CANCEL_SIGNAL:
+                raise PipelineCancelledError(
+                    f"Pipeline for project {project_id} was cancelled"
+                )
+            if value == HUMAN_ACTIVE_SIGNAL:
+                human_active = True
+                emit_event(project_id, "interrupt_activity_acknowledged")
+                continue
+            return value if value else "no"
 
     # --- CLI mode (original logic) ---
     kb = KeyBindings()

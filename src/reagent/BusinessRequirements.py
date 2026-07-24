@@ -21,7 +21,6 @@
 # opt-in to WebsiteSearchTool with ENABLE_WEBSITE_SEARCH_TOOL=1.
 from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task, before_kickoff, after_kickoff
-from crewai_tools import WebsiteSearchTool
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from typing import List
 from util.SoftwareManager import SoftwareManagerCrew, build_optional_tools

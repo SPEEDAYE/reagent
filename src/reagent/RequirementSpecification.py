@@ -9,7 +9,6 @@
 from util.SoftwareManager import SoftwareManagerCrew
 from crewai import Agent, Crew, Process, Task
 from crewai.project import CrewBase, agent, crew, task, before_kickoff, after_kickoff
-from crewai_tools import WebsiteSearchTool
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from typing import List
 from util.util import get_store_path
@@ -45,6 +44,4 @@ class SRSplaningCrew(RequirementsSpecificationDevCrew):
             agent = self.SoftwareManager()
         )
 
-
-    
     

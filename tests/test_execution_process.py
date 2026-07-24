@@ -133,6 +133,18 @@ class ProcessExecutionTests(unittest.IsolatedAsyncioTestCase):
             ["use_case", "non_functional_requirements"],
         )
 
+    async def test_interrupt_activity_is_forwarded_without_resuming(self):
+        feedback_queue = queue.SimpleQueue()
+        execution._ipc["review-project"] = {"feedback_queue": feedback_queue}
+        execution._project_runs["review-project"] = "aaa111bbb222"
+        service = execution.ExecutionService(execution._ipc_test_pipeline)
+
+        result = await service.mark_interrupt_active("review-project")
+
+        self.assertEqual(feedback_queue.get_nowait(), "__HUMAN_ACTIVE__")
+        self.assertEqual(result["status"], "activity_acknowledged")
+        self.assertEqual(result["run_id"], "aaa111bbb222")
+
     def test_crew_events_use_canonical_artifact_names(self):
         expected = {
             "DraftContentDiagramCrew": ("context_diagram", "上下文图"),
