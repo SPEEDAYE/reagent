@@ -65,6 +65,7 @@ PROVIDER_ENV_CANDIDATES = (
     "MODEL_PROVIDER",
     "DEFAULT_LLM_PROVIDER",
 )
+DEFAULT_LLM_TIMEOUT_SECONDS = 180.0
 
 PROVIDER_SETTINGS = {
     "openai": {
@@ -184,7 +185,11 @@ def resolve_llm_config() -> LLMConfig:
         api_key=api_key,
         base_url=base_url,
         temperature=_parse_float("LLM_TEMPERATURE"),
-        timeout=_parse_float("LLM_TIMEOUT"),
+        timeout=(
+            _parse_float("LLM_TIMEOUT")
+            if os.getenv("LLM_TIMEOUT")
+            else DEFAULT_LLM_TIMEOUT_SECONDS
+        ),
         max_tokens=_parse_int("LLM_MAX_TOKENS"),
         reasoning_effort=reasoning_effort,
     )

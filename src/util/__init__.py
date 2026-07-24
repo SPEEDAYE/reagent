@@ -34,7 +34,10 @@ def get_srs_Initial_Template(authors: str = 'csl'):
 import ctypes
 import gc
 import os
+import signal
+import threading
 import time
+from contextlib import contextmanager
 
 
 def _progress(stage: str, message: str, *, current: int | None = None, total: int | None = None) -> None:
@@ -62,6 +65,58 @@ def _release_crew_memory() -> None:
         pass
 
 
+class CrewAttemptTimeoutError(TimeoutError):
+    pass
+
+
+def _is_timeout_error(error: Exception) -> bool:
+    error_type = type(error).__name__.lower()
+    message = str(error).lower()
+    return (
+        isinstance(error, TimeoutError)
+        or "timeout" in error_type
+        or "timed out" in message
+        or "time out" in message
+    )
+
+
+def _crew_attempt_timeout_seconds() -> float:
+    raw = os.getenv("CREW_ATTEMPT_TIMEOUT_SECONDS", "600")
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 600.0
+
+
+@contextmanager
+def _crew_attempt_timeout(name: str):
+    """Bound one Crew kickoff on POSIX; LLM_TIMEOUT covers other platforms."""
+    timeout = _crew_attempt_timeout_seconds()
+    can_interrupt = (
+        os.name == "posix"
+        and threading.current_thread() is threading.main_thread()
+        and hasattr(signal, "setitimer")
+    )
+    if not can_interrupt:
+        yield
+        return
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+
+    def _raise_timeout(signum, frame):
+        raise CrewAttemptTimeoutError(
+            f"{name} exceeded the {timeout:g}s execution timeout"
+        )
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
 def run_with_retry(
     crew_callable,
     inputs,
@@ -80,7 +135,8 @@ def run_with_retry(
             _progress("crew_attempt", name, current=attempt, total=retries)
             crew_instance = crew_callable()
             crew_runner = crew_instance.crew()
-            crew_runner.kickoff(inputs=inputs)
+            with _crew_attempt_timeout(name):
+                crew_runner.kickoff(inputs=inputs)
 
             _progress("crew_success", name)
 
@@ -102,11 +158,12 @@ def run_with_retry(
             last_error = e
             _progress("crew_error", f"{name}: {e}", current=attempt, total=retries)
 
-            if attempt < retries:
+            retry_limit = min(retries, 2) if _is_timeout_error(e) else retries
+            if attempt < retry_limit:
                 time.sleep(delay)
             else:
                 raise Exception(
-                    f"[{name}] Failed after {retries} retries: {last_error}"
+                    f"[{name}] Failed after {attempt} retries: {last_error}"
                 )
         finally:
             # CrewAI objects contain agents, tasks, callbacks and HTTP clients.

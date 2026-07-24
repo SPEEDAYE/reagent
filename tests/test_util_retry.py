@@ -39,6 +39,18 @@ class RunWithRetryMemoryTests(unittest.TestCase):
             )
         self.assertEqual(release.call_count, 2)
 
+    @patch("util._release_crew_memory")
+    def test_timeout_stops_after_two_attempts(self, release):
+        with self.assertRaisesRegex(Exception, "Failed after 2 retries"):
+            run_with_retry(
+                lambda: _CrewFactory(TimeoutError("request timed out")),
+                {},
+                "timeout",
+                retries=5,
+                delay=0,
+            )
+        self.assertEqual(release.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

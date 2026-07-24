@@ -645,6 +645,12 @@ def _run_pipeline(
 
     from dotenv import load_dotenv
     load_dotenv(str(project_root / ".env"))
+    # API pipelines do not need CrewAI telemetry. Keeping OpenTelemetry out of
+    # spawned workers reduces unrelated background/native initialisation and
+    # makes first-task failures easier to attribute to the actual LLM request.
+    os.environ["CREWAI_DISABLE_TELEMETRY"] = "true"
+    os.environ["OTEL_SDK_DISABLED"] = "true"
+    os.environ.setdefault("ENABLE_WEBSITE_SEARCH_TOOL", "0")
 
     _worker_event_queue = event_queue
     _worker_cancel_event = cancel_event
