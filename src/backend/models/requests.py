@@ -41,6 +41,7 @@ class StreamResumeRequest(BaseModel):
     resume_type: Literal["feedback", "accept", "redo_artifact", "skip"]
     human_comment: Optional[str] = None
     target_artifact: Optional[str] = None
+    target_artifacts: Optional[list[str]] = None
     prune_downstream: Optional[bool] = False
 
 

@@ -92,6 +92,7 @@ async def stream_resume(
             resume_type=req.resume_type,
             human_comment=req.human_comment,
             target_artifact=req.target_artifact,
+            target_artifacts=req.target_artifacts,
             prune_downstream=req.prune_downstream,
         )
     except RuntimeError as exc:

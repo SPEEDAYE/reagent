@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from backend.services.stream_manager import stream_manager
 from backend.services.project_service import ProjectService
 from backend.services.run_service import RunService
+from backend.services.artifact_service import ARTIFACT_META
 from backend.config import settings
 
 _executor: ProcessPoolExecutor | None = None
@@ -50,6 +51,42 @@ _cancel_lock = threading.Lock()
 
 project_svc = ProjectService()
 run_svc = RunService()
+
+# CrewAI 执行名 -> 后端标准制品键。未列出的 Crew 都是内部步骤，
+# 只能发送 crew_start/crew_complete，不能伪装成 artifact_complete。
+CREW_ARTIFACT_NAMES: dict[str, str] = {
+    "SurveyCrew": "survey",
+    "DraftContentDiagramCrew": "context_diagram",
+    "DraftEventListCrew": "event_list",
+    "UserIntroductionDev": "user_introduction",
+    "FeatureTreeDev": "feature_tree",
+    "BusinessScopeDev": "business_scope",
+    "UserCaseCrew": "use_case",
+    "NFRCrew": "non_functional_requirements",
+    "FRCrew": "functional_requirements",
+    "DataFlowDiagramCrew": "data_flow_diagram",
+    "ERDCrew": "ERD",
+    "DataDictionaryCrew": "data_dictionary",
+    "DialogMapCrew": "dialog_map",
+    "UsageScenarioCrew": "usage_scenario",
+    "STDCrew": "state_transition_diagram",
+}
+
+
+def _artifact_event_fields(artifact_name: str) -> dict:
+    display_name = ARTIFACT_META.get(artifact_name, (artifact_name, ""))[0]
+    return {
+        "artifact_name": artifact_name,
+        "display_name": display_name,
+        "produces_artifact": True,
+    }
+
+
+def _crew_event_fields(crew_name: str) -> dict:
+    artifact_name = CREW_ARTIFACT_NAMES.get(crew_name)
+    if not artifact_name:
+        return {"produces_artifact": False}
+    return _artifact_event_fields(artifact_name)
 
 
 def _get_process_runtime():
@@ -391,8 +428,15 @@ class ExecutionService:
             _project_runs.pop(project_id, None)
             stream_manager.remove_queue(project_id)
 
-    async def resume(self, project_id: str, resume_type: str,
-                     human_comment: str | None = None, **kwargs):
+    async def resume(
+        self,
+        project_id: str,
+        resume_type: str,
+        human_comment: str | None = None,
+        target_artifact: str | None = None,
+        target_artifacts: list[str] | None = None,
+        **kwargs,
+    ):
         # UX semantics:
         #   "accept"        -> no feedback, proceed to next step (-> "no")
         #   "feedback"      -> the human_comment is the feedback text; pipeline
@@ -406,6 +450,14 @@ class ExecutionService:
             "redo_artifact": human_comment or "redo",
         }
         value = feedback_map.get(resume_type, "no")
+        targets = list(dict.fromkeys(
+            name for name in (target_artifacts or [target_artifact]) if name
+        ))
+        if targets and value != "no":
+            value = (
+                f"目标制品：{', '.join(targets)}\n"
+                f"反馈意见：{value}"
+            )
         ipc = _ipc.get(project_id)
         if not ipc:
             raise RuntimeError("Pipeline worker is not active; it may have restarted")
@@ -414,7 +466,12 @@ class ExecutionService:
         run_id = _project_runs.get(project_id)
         if run_id:
             await run_svc.update_status(run_id, status="running")
-        return {"status": "resumed", "project_id": project_id, "run_id": run_id}
+        return {
+            "status": "resumed",
+            "project_id": project_id,
+            "run_id": run_id,
+            "target_artifacts": targets,
+        }
 
     async def cancel(self, project_id: str) -> dict:
         """Signal cancellation across the worker-process boundary."""
@@ -617,15 +674,32 @@ def _run_pipeline(
             current_stage=config.get("_current_stage", ""),
             current_crew=name,
         )
-        _emit(project_id, "crew_start", crew_name=name,
-              stage=config.get("_current_stage", ""))
+        event_fields = _crew_event_fields(name)
+        _emit(
+            project_id,
+            "crew_start",
+            crew_name=name,
+            stage=config.get("_current_stage", ""),
+            **event_fields,
+        )
         try:
             result = _original_run_with_retry(
                 crew_callable, inputs, name, retries, delay,
                 post_process_callable, post_process_params,
             )
             _update_project_status_sync(project_id, current_crew=None)
-            _emit(project_id, "artifact_complete", crew_name=name)
+            completion_type = (
+                "artifact_complete"
+                if event_fields["produces_artifact"]
+                else "crew_complete"
+            )
+            _emit(
+                project_id,
+                completion_type,
+                crew_name=name,
+                stage=config.get("_current_stage", ""),
+                **event_fields,
+            )
             return result
         except Exception as e:
             _update_project_status_sync(project_id, current_crew=None)
@@ -678,6 +752,13 @@ def _run_pipeline(
             project_name=project_name,
             Description=description,
             project_id=project_id,
+        )
+        _emit(
+            project_id,
+            "artifact_complete",
+            crew_name="BRD",
+            stage="business_requirements",
+            **_artifact_event_fields("BRD"),
         )
         _emit(project_id, "stage_complete", stage="business_requirements")
 
@@ -749,8 +830,9 @@ def _run_pipeline(
         _emit(project_id, "stage_start", stage="srs_generation",
               stage_index=6, total_stages=6, stage_label="SRS 生成阶段")
 
-        # Import from the reagent main module
-        from main import RequirementSpecificationrun
+        # 必须使用包路径；仓库根目录也有 main.py（统一启动脚本），
+        # ``from main`` 会错误导入该文件并导致 ImportError。
+        from reagent.main import RequirementSpecificationrun
         RequirementSpecificationrun(
             document_template=doc_template,
             document_skeleton=doc_skeleton,
@@ -758,6 +840,13 @@ def _run_pipeline(
             chapter_dependence=ch_dep,
             SRS_Reference=art_plan,
             srs_example_path=srs_example_path,
+        )
+        _emit(
+            project_id,
+            "artifact_complete",
+            crew_name="SRS",
+            stage="srs_generation",
+            **_artifact_event_fields("SRS"),
         )
         _emit(project_id, "stage_complete", stage="srs_generation")
 

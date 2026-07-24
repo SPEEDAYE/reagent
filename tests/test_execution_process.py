@@ -1,5 +1,6 @@
 import asyncio
 import os
+import queue
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -105,6 +106,59 @@ class ProcessExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(event.get("type") == "completed" for event in healthy_history)
         )
+
+    async def test_resume_includes_all_selected_artifacts_in_feedback(self):
+        feedback_queue = queue.SimpleQueue()
+        execution._ipc["multi-target"] = {"feedback_queue": feedback_queue}
+        service = execution.ExecutionService(execution._ipc_test_pipeline)
+        with patch.object(
+            execution.project_svc, "update_status", new=AsyncMock()
+        ):
+            result = await service.resume(
+                "multi-target",
+                "feedback",
+                "请补充异常流程并明确性能指标",
+                target_artifacts=[
+                    "use_case",
+                    "non_functional_requirements",
+                ],
+            )
+
+        feedback = feedback_queue.get_nowait()
+        self.assertIn("use_case", feedback)
+        self.assertIn("non_functional_requirements", feedback)
+        self.assertIn("请补充异常流程并明确性能指标", feedback)
+        self.assertEqual(
+            result["target_artifacts"],
+            ["use_case", "non_functional_requirements"],
+        )
+
+    def test_crew_events_use_canonical_artifact_names(self):
+        expected = {
+            "DraftContentDiagramCrew": ("context_diagram", "上下文图"),
+            "DraftEventListCrew": ("event_list", "事件列表"),
+            "UserCaseCrew": ("use_case", "用例"),
+            "NFRCrew": ("non_functional_requirements", "非功能需求"),
+            "FRCrew": ("functional_requirements", "功能需求"),
+            "STDCrew": ("state_transition_diagram", "状态转换图"),
+        }
+        for crew_name, (artifact_name, display_name) in expected.items():
+            fields = execution._crew_event_fields(crew_name)
+            self.assertTrue(fields["produces_artifact"])
+            self.assertEqual(fields["artifact_name"], artifact_name)
+            self.assertEqual(fields["display_name"], display_name)
+
+    def test_internal_crews_are_not_reported_as_artifacts(self):
+        for crew_name in (
+            "ExtractDocumentCrew",
+            "BRDev Chapter 1",
+            "SRS Chapter planning 0",
+            "SRS Chapter 1",
+        ):
+            self.assertEqual(
+                execution._crew_event_fields(crew_name),
+                {"produces_artifact": False},
+            )
 
 
 if __name__ == "__main__":
